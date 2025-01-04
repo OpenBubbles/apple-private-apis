@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 #[cfg(feature = "remote-clearadi")]
 use anisette_clearadi::ClearADIClient;
+#[cfg(target_os = "macos")]
 use aos_kit::AOSKitAnisetteProvider;
 use thiserror::Error;
 use tokio::sync::Mutex;
