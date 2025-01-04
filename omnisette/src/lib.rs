@@ -130,6 +130,7 @@ pub struct LoginClientInfo {
     pub browser_user_agent: String,
     pub hardware_headers: HashMap<String, String>,
     pub push_token: Option<String>,
+    pub update_account_bundle_id: String,
 }
 
 

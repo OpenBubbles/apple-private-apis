@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 // use crate::anisette::AnisetteData;
 use crate::{anisette::AnisetteData, Error};
@@ -6,7 +6,7 @@ use aes::cipher::block_padding::Pkcs7;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use hmac::{Hmac, Mac};
 use omnisette::{AnisetteClient, AnisetteProvider, ArcAnisetteClient, LoginClientInfo};
-use plist::Value;
+use plist::{Dictionary, Value};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue}, Certificate, Client, ClientBuilder, Proxy, Response
 };
@@ -94,9 +94,9 @@ pub struct AppleAccount<T: AnisetteProvider> {
     // pub spd:  Option<plist::Dictionary>,
     //mutable spd
     pub spd: Option<plist::Dictionary>,
-    pub pet: Option<String>,
     pub username: Option<String>,
     client: Client,
+    pub tokens: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -192,7 +192,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let client = ClientBuilder::new()
             .cookie_store(true)
             .add_root_certificate(Certificate::from_der(APPLE_ROOT)?)
-            // .proxy(Proxy::https("https://localhost:8080").unwrap())
+            // .proxy(Proxy::https("https://192.168.86.25:8080").unwrap())
             // .danger_accept_invalid_certs(true)
             .http1_title_case_headers()
             .connection_verbose(true)
@@ -203,8 +203,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             anisette,
             client_info,
             spd: None,
-            pet: None,
             username: None,
+            tokens: HashMap::new(),
         })
     }
 
@@ -291,7 +291,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
     }
 
     pub fn get_pet(&self) -> Option<String> {
-        self.pet.clone()
+        self.tokens.get("com.apple.gs.idms.pet").cloned()
     }
 
     pub fn get_name(&self) -> (String, String) {
@@ -423,10 +423,12 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let status = res.get("Status").unwrap().as_dictionary().unwrap();
 
         if let Some(Value::Dictionary(dict)) = decoded_spd.get("t") {
-            if let Some(Value::Dictionary(dict)) = dict.get("com.apple.gs.idms.pet") {
-                self.pet = Some(dict.get("token").unwrap().as_string().unwrap().to_string());
-            }
+            let keys: HashMap<String, String> = dict.iter().filter_map(|(service, value)| {
+                Some((service.clone(), value.as_dictionary()?.get("token")?.as_string()?.to_string()))
+            }).collect();
+            self.tokens = keys;
         }
+        println!("spd {:?}", decoded_spd);
 
         self.spd = Some(decoded_spd);
 
@@ -527,6 +529,47 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         Ok(new_state)
     }
 
+    pub async fn request_update_account(&self) -> Result<String, Error> {
+        let mut map = HashMap::new();
+        let adsid = self.spd.as_ref().unwrap()["adsid"].as_string().unwrap().to_string();
+        let base_headers = self.anisette.lock().await.get_headers().await?.clone();
+        map.extend(base_headers);
+
+        map.extend([
+            ("Authorization", format!("Basic {}", base64::encode(format!("{}:{}", self.username.as_ref().unwrap().trim(), self.get_pet().expect("No pet?"))))),
+            ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)".to_string()),
+            ("X-Apple-ADSID", adsid.clone()),
+            ("X-Apple-GS-Token", base64::encode(format!("{}:{}", adsid, self.tokens["com.apple.gs.icloud.family.auth"]))),
+            ("X-Apple-I-Current-Application", "com.apple.systempreferences.AppleIDSettings".to_string()),
+            ("X-Apple-I-Current-Application-Version", "1".to_string()),
+            ("X-MMe-Client-Info", self.client_info.update_account_bundle_id.clone()),
+            ("X-MMe-Country", "US".to_string()),
+            ("X-MMe-Language", "en,en-US".to_string()),
+            ("x-apple-i-device-type", "1".to_string()),
+        ].into_iter().map(|(a, b)| (a.to_string(), b)));
+
+        let header_map = HeaderMap::from_iter(map.into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), b.parse().unwrap())));
+
+        let mut buffer = Vec::new();
+        plist::to_writer_xml(&mut buffer, &Dictionary::new())?;
+
+        let text = self.client.post("https://setup.icloud.com/setup/update_account_ui")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("Accept-Encoding", "gzip, deflate, br")
+            .header("Accept-Language", "en-US,en")
+            .header("Content-Type", "text/plist")
+            .header("Origin", "null")
+            .header("Sec-Fetch-Dest", "document")
+            .header("Sec-Fetch-Mode", "navigate")
+            .header("Sec-Fetch-Site", "cross-site")
+            .headers(header_map)
+            .body(buffer)
+            .send().await?
+            .text().await?;
+
+        Ok(text)
+    }
+
     pub async fn verify_2fa(&mut self, code: String) -> Result<LoginState, Error> {
         let headers = self.build_2fa_headers(false);
         // println!("Recieved code: {}", code);
@@ -546,6 +589,12 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             plist::from_bytes(res.text().await?.as_bytes())?;
 
         Self::check_error(&res)?;
+
+        self.tokens = headers.get_all("X-Apple-GS-Token").iter().map(|header| {
+            let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
+            let parts = decoded.split(":").collect::<Vec<&str>>();
+            (parts[0].to_string(), parts[1].to_string())
+        }).collect();
 
         if let Some(pet) = headers.get("X-Apple-PE-Token") {
             self.parse_pet_header(pet.to_str().unwrap());
@@ -573,6 +622,12 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             return Err(Error::Bad2faCode);
         }
 
+        self.tokens = res.headers().get_all("X-Apple-GS-Token").iter().map(|header| {
+            let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
+            let parts = decoded.split(":").collect::<Vec<&str>>();
+            (parts[0].to_string(), parts[1].to_string())
+        }).collect();
+
         if let Some(pet) = res.headers().get("X-Apple-PE-Token") {
             self.parse_pet_header(pet.to_str().unwrap());
             return Ok(LoginState::LoggedIn);
@@ -583,7 +638,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
     fn parse_pet_header(&mut self, data: &str) {
         let decoded = String::from_utf8(base64::decode(data).unwrap()).unwrap();
-        self.pet = Some(decoded.split(":").nth(1).unwrap().to_string());
+        self.tokens.insert("com.apple.gs.idms.pet".to_string(), decoded.split(":").nth(1).unwrap().to_string());
     }
 
     fn check_error(res: &plist::Dictionary) -> Result<(), Error> {
