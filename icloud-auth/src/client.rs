@@ -16,6 +16,7 @@ use srp::{
     client::{SrpClient, SrpClientVerifier},
     groups::G_2048,
 };
+use log::error;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -430,6 +431,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         }
         println!("spd {:?}", decoded_spd);
 
+        self.username = Some(decoded_spd.get("acname").expect("No account name?").as_string().unwrap().to_string());
         self.spd = Some(decoded_spd);
 
         if let Some(plist::Value::String(s)) = status.get("au") {
@@ -619,6 +621,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             .send().await?;
 
         if res.status() != 200 {
+            error!("Security code failed, response: {}", res.text().await?);
             return Err(Error::Bad2faCode);
         }
 
