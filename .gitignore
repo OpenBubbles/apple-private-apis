@@ -6,5 +6,6 @@ ignore_this_test.js
 
 # IDE generated files
 .idea
+*.iml
 
 anisette_test/

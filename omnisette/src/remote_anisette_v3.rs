@@ -18,7 +18,7 @@ use std::fmt::Write;
 use base64::Engine;
 use async_trait::async_trait;
 
-use crate::{anisette_headers_provider::AnisetteHeadersProvider, AnisetteError, LoginClientInfo};
+use crate::{AnisetteError, AnisetteProvider, LoginClientInfo};
 
 const APPLE_ROOT: &[u8] = include_bytes!("../../icloud-auth/src/apple_root.der");
 
@@ -141,7 +141,7 @@ pub struct AnisetteData {
 impl AnisetteData {
     pub fn get_headers(&self) -> HashMap<String, String> {
         let dt: DateTime<Utc> = Utc::now().round_subsecs(0);
-        
+
         HashMap::from_iter([
             ("X-Apple-I-Client-Time".to_string(), dt.format("%+").to_string().replace("+00:00", "Z")),
             ("X-Apple-I-TimeZone".to_string(), "UTC".to_string()),
@@ -241,11 +241,6 @@ impl AnisetteClient {
                 }
             },
             AnisetteHeaders::Headers { machine_id, one_time_password, routing_info } => {
-                // println!("before {one_time_password}");
-                // let mut decoded = base64_decode(&one_time_password);
-                // *decoded.last_mut().unwrap() = 0x1;
-                // let one_time_password = base64_encode(&decoded);
-                // println!("after {one_time_password}");
                 Ok(AnisetteData {
                     machine_id,
                     one_time_password,
@@ -318,7 +313,7 @@ impl AnisetteClient {
                         let protocol_val = plist::Value::from_reader(Cursor::new(text.as_str()))?;
                         let spim = protocol_val.as_dictionary().unwrap().get("Response").unwrap().as_dictionary().unwrap()
                             .get("spim").unwrap().as_string().unwrap();
-                        
+
                         debug!("GiveStartProvisioningData");
                         #[derive(Serialize)]
                         struct Spim {
@@ -339,7 +334,7 @@ impl AnisetteClient {
                         let response = protocol_val.as_dictionary().unwrap().get("Response").unwrap().as_dictionary().unwrap();
 
                         debug!("GiveEndProvisioningData");
-                        
+
                         #[derive(Serialize)]
                         struct EndProvisioning<'t> {
                             ptm: &'t str,
@@ -368,29 +363,57 @@ impl AnisetteClient {
 }
 
 
-impl AnisetteProvider for AnisetteClient {
-    async fn get_anisette_headers(&mut self) -> Result<HashMap<String, String>, AnisetteError> {
-        fs::create_dir_all(&self.configuration_path)?;
-        
-        let config_path = self.configuration_path.join("state.plist");
-        let mut state = if let Ok(text) = plist::from_file(&config_path) {
-            text
-        } else {
-            AnisetteState::new()
-        };
-        
-        if !state.is_provisioned() {
-            self.provision(&mut state).await?;
-            plist::to_file_xml(&config_path, &state)?;
+pub struct RemoteAnisetteProviderV3 {
+    client_url: String,
+    client: Option<AnisetteClient>,
+    pub state: Option<AnisetteState>,
+    configuration_path: PathBuf,
+    info: LoginClientInfo
+}
+
+impl RemoteAnisetteProviderV3 {
+    pub fn new(url: String, info: LoginClientInfo, configuration_path: PathBuf) -> RemoteAnisetteProviderV3 {
+        RemoteAnisetteProviderV3 {
+            client_url: url,
+            client: None,
+            state: None,
+            configuration_path,
+            info
         }
-        let data = match self.get_headers(&state).await {
+    }
+}
+
+impl AnisetteProvider for RemoteAnisetteProviderV3 {
+    async fn get_anisette_headers(&mut self) -> Result<HashMap<String, String>, AnisetteError> {
+        if self.client.is_none() {
+            self.client = Some(AnisetteClient::new(self.client_url.clone(), self.info.clone()).await?);
+        }
+        let client = self.client.as_ref().unwrap();
+
+        fs::create_dir_all(&self.configuration_path)?;
+
+        let config_path = self.configuration_path.join("state.plist");
+        if self.state.is_none() {
+            self.state = Some(if let Ok(text) = plist::from_file(&config_path) {
+                text
+            } else {
+                AnisetteState::new()
+            });
+        }
+
+        let state = self.state.as_mut().unwrap();
+        if !state.is_provisioned() {
+            client.provision(state).await?;
+            plist::to_file_xml(&config_path, state)?;
+        }
+        let data = match client.get_headers(&state).await {
             Ok(data) => data,
             Err(err) => {
                 if matches!(err, AnisetteError::AnisetteNotProvisioned) {
-                    state.provisioned = None;
-                    self.provision(&mut state).await?;
-                    plist::to_file_xml(config_path, &mut state)?;
-                    self.get_headers(&state).await?
+                    state.adi_pb = None;
+                    client.provision(state).await?;
+                    plist::to_file_xml(config_path, state)?;
+                    client.get_headers(&state).await?
                 } else { panic!() }
             },
         };
