@@ -16,6 +16,9 @@ use aos_kit::AOSKitAnisetteProvider;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+#[cfg(feature = "remote-anisette-v3")]
+use crate::remote_anisette_v3::RemoteAnisetteProviderV3;
+
 #[cfg(feature = "remote-clearadi")]
 pub mod anisette_clearadi;
 
@@ -71,17 +74,26 @@ pub trait AnisetteProvider {
     fn get_anisette_headers(&mut self) -> impl std::future::Future<Output = Result<HashMap<String, String>, AnisetteError>> + Send;
 }
 
-// conditionally compile this
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), feature = "remote-anisette-v3"))]
+pub type DefaultAnisetteProvider = RemoteAnisetteProviderV3;
+#[cfg(all(not(target_os = "macos"), feature = "remote-anisette-v3"))]
+pub fn default_provider(info: LoginClientInfo, path: PathBuf) -> ArcAnisetteClient<DefaultAnisetteProvider> {
+    Arc::new(Mutex::new(AnisetteClient::new(RemoteAnisetteProviderV3::new(
+        DEFAULT_ANISETTE_URL_V3.to_string(),
+        info,
+        path
+    ))))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "remote-clearadi"))]
 pub type DefaultAnisetteProvider = ClearADIClient;
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), feature = "remote-clearadi"))]
 pub fn default_provider(info: LoginClientInfo, path: PathBuf) -> ArcAnisetteClient<DefaultAnisetteProvider> {
     Arc::new(Mutex::new(AnisetteClient::new(ClearADIClient {
         login_info: info,
         configuration_path: path
     })))
 }
-
 
 #[cfg(target_os = "macos")]
 pub type DefaultAnisetteProvider = AOSKitAnisetteProvider<'static>;
