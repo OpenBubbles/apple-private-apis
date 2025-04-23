@@ -1,4 +1,4 @@
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::{Duration, SystemTime}};
 
 // use crate::anisette::AnisetteData;
 use crate::{anisette::AnisetteData, Error};
@@ -98,6 +98,7 @@ pub struct AppleAccount<T: AnisetteProvider> {
     pub username: Option<String>,
     client: Client,
     pub tokens: HashMap<String, String>,
+    pub hashed_password: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -206,6 +207,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             spd: None,
             username: None,
             tokens: HashMap::new(),
+            hashed_password: None,
         })
     }
 
@@ -262,7 +264,12 @@ impl<T: AnisetteProvider> AppleAccount<T> {
     ) -> Result<AppleAccount<T>, Error> {
         let mut _self = AppleAccount::new_with_anisette(client_info, anisette)?;
         let (username, password) = appleid_closure();
-        let mut response = _self.login_email_pass(&username, &password).await?;
+
+        let mut password_hasher = sha2::Sha256::new();
+        password_hasher.update(&password.as_bytes());
+        let hashed_password = password_hasher.finalize();
+
+        let mut response = _self.login_email_pass(&username, &hashed_password).await?;
         loop {
             match response {
                 // LoginState::NeedsDevice2FA => response = _self.send_2fa_to_devices().await?,
@@ -277,7 +284,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
                     response = _self.verify_sms_2fa(tfa_closure(), body).await?
                 }
                 LoginState::NeedsLogin => {
-                    response = _self.login_email_pass(&username, &password).await?
+                    response = _self.login_email_pass(&username, &hashed_password).await?
                 }
                 LoginState::LoggedIn => return Ok(_self),
                 LoginState::NeedsExtraStep(step) => {
@@ -302,10 +309,42 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         )
     }
 
+    pub async fn get_token(&mut self, token: &str) -> Option<String> {
+        let has_valid_token = if !self.tokens.is_empty() {
+            let data = self.tokens.get(token)?; // if it's not here, we don't have one
+            let jwt = data.split(".").nth(1).expect("Not a jwt??");
+
+            #[derive(Deserialize)]
+            struct Payload {
+                exp: u64,
+            }
+
+            let decoded: Payload = serde_json::from_slice(&base64::decode(jwt).expect("base64 decode failed!")).expect("json jwt failed");
+            let time = SystemTime::UNIX_EPOCH + Duration::from_secs(decoded.exp);
+            time.elapsed().is_err()
+        } else {
+            false
+        };
+        if !has_valid_token {
+            // we've elapsed, get new tokens...
+            let username = self.username.clone()?;
+            let hashed_password = self.hashed_password.clone()?;
+            match self.login_email_pass(&username, &hashed_password).await {
+                Ok(LoginState::LoggedIn) => {},
+                _err => {
+                    error!("Failed to refresh tokens, state {_err:?}");
+                    return None
+                }
+            }
+        }
+
+        Some(self.tokens.get(token)?.to_string())
+    }
+
     pub async fn login_email_pass(
         &mut self,
         username: &str,
-        password: &str,
+        hashed_password: &[u8],
     ) -> Result<LoginState, Error> {
         let srp_client = SrpClient::<Sha256>::new(&G_2048);
         let a: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
@@ -366,10 +405,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let iters = res.get("i").unwrap().as_signed_integer().unwrap();
         let c = res.get("c").unwrap().as_string().unwrap();
 
-        let mut password_hasher = sha2::Sha256::new();
-        password_hasher.update(&password.as_bytes());
-        let hashed_password = password_hasher.finalize();
-
+        self.hashed_password = Some(hashed_password.to_vec());
         let mut password_buf = [0u8; 32];
         pbkdf2::pbkdf2::<hmac::Hmac<Sha256>>(
             &hashed_password,
