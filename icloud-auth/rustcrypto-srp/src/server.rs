@@ -66,7 +66,7 @@ use num_bigint::BigUint;
 use subtle::ConstantTimeEq;
 
 use crate::types::{SrpAuthError, SrpGroup};
-use crate::utils::{compute_k, compute_m1, compute_m2, compute_u, encode_hex};
+use crate::utils::{compute_k, compute_m1, compute_m2, compute_u};
 
 /// SRP server state
 pub struct SrpServer<'a, D: Digest> {
