@@ -21,6 +21,10 @@ impl ProvisionedMachine {
     pub fn generate_otp(&self) -> Vec<u8> {
         todo!()
     }
+
+    pub fn gen_2fa_code(&self) -> u32 {
+        todo!()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
