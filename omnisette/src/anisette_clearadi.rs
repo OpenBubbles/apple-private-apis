@@ -280,6 +280,28 @@ impl ClearADIClient {
 }
 
 impl AnisetteProvider for ClearADIClient {
+    async fn get_2fa_code(&mut self) -> Result<u32, AnisetteError> {
+        fs::create_dir_all(&self.configuration_path)?;
+        
+        let config_path = self.configuration_path.join("state.plist");
+        let mut state = if let Ok(text) = plist::from_file(&config_path) {
+            text
+        } else {
+            AnisetteState::new()
+        };
+        
+        if !state.is_provisioned() {
+            self.provision(&mut state).await?;
+            plist::to_file_xml(&config_path, &state)?;
+        }
+        
+        let machine = state.provisioned.as_ref().ok_or(AnisetteError::AnisetteNotProvisioned)?;
+
+        let code = machine.machine().gen_2fa_code();
+
+        Ok(code)
+    }
+
     async fn get_anisette_headers(&mut self) -> Result<HashMap<String, String>, AnisetteError> {
         fs::create_dir_all(&self.configuration_path)?;
         

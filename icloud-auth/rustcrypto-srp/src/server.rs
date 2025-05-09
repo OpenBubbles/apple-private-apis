@@ -66,7 +66,7 @@ use num_bigint::BigUint;
 use subtle::ConstantTimeEq;
 
 use crate::types::{SrpAuthError, SrpGroup};
-use crate::utils::{compute_k, compute_m1, compute_m2, compute_u};
+use crate::utils::{compute_k, compute_m1, compute_m2, compute_u, encode_hex};
 
 /// SRP server state
 pub struct SrpServer<'a, D: Digest> {
@@ -76,7 +76,7 @@ pub struct SrpServer<'a, D: Digest> {
 
 /// SRP server state after handshake with the client.
 pub struct SrpServerVerifier<D: Digest> {
-    m1: Output<D>,
+    pub m1: Output<D>,
     m2: Output<D>,
     key: Vec<u8>,
 }
@@ -146,21 +146,23 @@ impl<'a, D: Digest> SrpServer<'a, D> {
 
         let key = self.compute_premaster_secret(&a_pub, &v, &u, &b);
 
+        let key = D::digest(&key.to_bytes_be());
+
         let m1 = compute_m1::<D>(
             &a_pub.to_bytes_be(),
             &b_pub.to_bytes_be(),
-            &key.to_bytes_be(),
+            &key,
             username,
             salt,
             self.params,
         );
 
-        let m2 = compute_m2::<D>(&a_pub.to_bytes_be(), &m1, &key.to_bytes_be());
+        let m2 = compute_m2::<D>(&a_pub.to_bytes_be(), &m1, &key);
 
         Ok(SrpServerVerifier {
             m1,
             m2,
-            key: key.to_bytes_be(),
+            key: key.to_vec(),
         })
     }
 }

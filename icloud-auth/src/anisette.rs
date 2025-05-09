@@ -32,6 +32,65 @@ impl AnisetteData {
         .collect()
     }
 
+    pub fn get_postdata_headers(&self) -> HashMap<String, String> {
+        // user must supply, content-type and accept
+        // unaccounted headers: Accept-Encoding, Connection, Host
+        // also unaccounted: X-Apple-I-UrlSwitch-Info, X-Apple-I-SRL-NO (opt), X-Apple-I-ROM (opt)
+        const ACCEPTABLE_HEADERS: &[&'static str] = &["X-Apple-I-MD-LU", "X-Apple-I-MD-RINFO", "X-Apple-I-MD-M", "X-Apple-I-MD", "X-Mme-Device-Id", "X-Apple-I-Client-Time", "X-Apple-I-TimeZone"];
+        self.base_headers.clone().into_iter().filter(|(key, _)| ACCEPTABLE_HEADERS.contains(&key.as_str()))
+            .chain([
+                ("X-Apple-I-Device-Configuration-Mode", "0"),
+                ("X-Apple-I-CDP-Status", "true"),
+                ("X-Apple-I-OT-Status", "true"),
+                ("User-Agent", &self.client_info.akd_user_agent),
+                ("X-Apple-Requested-Partition", "0"),
+                ("X-MMe-Client-Info", &self.client_info.mme_client_info_akd),
+                ("X-Apple-I-CK-Presence", "true"),
+                ("X-Apple-I-DeviceUserMode", "0"),
+                ("X-Apple-AK-DataRecoveryService-Status", "1"),
+                ("X-Apple-I-TimeZone-Offset", "0"),
+                ("X-Apple-I-Service-Type", "itunesstore"),
+                ("x-apple-i-device-type", "1"),
+                ("Accept-Language", "en-US,en;q=0.9"),
+            ].into_iter().map(|(a, b)| (a.to_string(), b.to_string())))
+        .collect()
+    }
+
+    pub fn get_circle_headers(&self) -> HashMap<String, String> {
+        // user must supply, content-type and accept
+        // unaccounted headers: Accept-Encoding, Connection, Host
+        // also unaccounted: X-Apple-I-UrlSwitch-Info, X-Apple-I-SRL-NO (opt), X-Apple-I-ROM (opt)
+        const ACCEPTABLE_HEADERS: &[&'static str] = &["X-Apple-I-MD-LU", "X-Apple-I-MD-RINFO", "X-Apple-I-MD-M", "X-Apple-I-MD", "X-Mme-Device-Id", "X-Apple-I-Client-Time", "X-Apple-I-TimeZone"];
+        self.base_headers.clone().into_iter().filter(|(key, _)| ACCEPTABLE_HEADERS.contains(&key.as_str()))
+            .chain([
+                ("X-Apple-I-Device-Configuration-Mode", "0"),
+                ("User-Agent", &self.client_info.akd_user_agent),
+                ("X-MMe-Client-Info", &self.client_info.mme_client_info_akd),
+                ("X-Apple-I-DeviceUserMode", "0"),
+                ("X-Apple-I-TimeZone-Offset", "0"),
+                ("Accept-Language", "en-US,en;q=0.9"),
+            ].into_iter().map(|(a, b)| (a.to_string(), b.to_string())))
+        .collect()
+    }
+
+    pub fn get_takedown_headers(&self) -> HashMap<String, String> {
+        // user must supply, content-type and accept
+        // unaccounted headers: Accept-Encoding, Connection, Host
+        // also unaccounted: X-Apple-I-UrlSwitch-Info, X-Apple-I-SRL-NO (opt), X-Apple-I-ROM (opt)
+        const ACCEPTABLE_HEADERS: &[&'static str] = &["X-Apple-I-MD-LU", "X-Apple-I-MD-RINFO", "X-Apple-I-MD-M", "X-Apple-I-MD", "X-Mme-Device-Id", "X-Apple-I-Client-Time", "X-Apple-I-TimeZone", "X-Mme-Device-Id"];
+        self.base_headers.clone().into_iter().filter(|(key, _)| ACCEPTABLE_HEADERS.contains(&key.as_str()))
+            .chain([
+                ("X-Apple-I-Device-Configuration-Mode", "0"),
+                ("User-Agent", &self.client_info.akd_user_agent),
+                ("X-MMe-Client-Info", &self.client_info.mme_client_info_akd),
+                ("X-Apple-I-DeviceUserMode", "0"),
+                ("X-Apple-AK-DataRecoveryService-Status", "1"),
+                ("X-Apple-I-TimeZone-Offset", "0"),
+                ("Accept-Language", "en-US,en;q=0.9"),
+            ].into_iter().map(|(a, b)| (a.to_string(), b.to_string())))
+        .collect()
+    }
+
     pub fn get_cpd_data(&self, request: &str) -> Dictionary {
         const ACCEPTABLE_HEADERS: &[&'static str] = &[
             "X-Apple-I-Client-Time",
@@ -43,7 +102,7 @@ impl AnisetteData {
         ];
         self.base_headers.clone().into_iter().filter(|(key, _)| ACCEPTABLE_HEADERS.contains(&key.as_str()))
             .map(|(a, b)| (a, Value::String(b)))
-            .chain(self.client_info.push_token.as_ref().map(|v| ("pktn".to_string(), Value::String(v.clone()))).into_iter())
+            .chain(self.client_info.push_token.as_ref().map(|v| ("ptkn".to_string(), Value::String(v.clone()))).into_iter())
             .chain([
                 ("X-Apple-I-Device-Configuration-Mode", "0"),
                 ("X-Apple-I-Request-UUID", request),

@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 #[cfg(feature = "remote-clearadi")]
@@ -72,6 +73,11 @@ pub const DEFAULT_ANISETTE_URL_V3: &str = "https://ani.sidestore.io";
 
 pub trait AnisetteProvider {
     fn get_anisette_headers(&mut self) -> impl std::future::Future<Output = Result<HashMap<String, String>, AnisetteError>> + Send;
+    fn get_2fa_code(&mut self) -> impl std::future::Future<Output = Result<u32, AnisetteError>> + Send {
+        async {
+            Err(AnisetteError::MissingLibraries)
+        }
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "remote-anisette-v3"))]
@@ -95,6 +101,24 @@ pub fn default_provider(info: LoginClientInfo, path: PathBuf) -> ArcAnisetteClie
     })))
 }
 
+#[tokio::test]
+async fn test_adi() {
+    let default = default_provider(LoginClientInfo {
+        ak_context_type: "imessage".to_string(),
+        client_app_name: "Messages".to_string(),
+        client_bundle_id: "com.apple.MobileSMS".to_string(),
+        mme_client_info: "<iMac13,1> <macOS;13.6.4;22G513> <com.apple.AuthKit/1 (com.apple.MobileSMS/1262.500.151.1.2)>".to_string(),
+        mme_client_info_akd: "<iMac13,1> <macOS;13.6.4;22G513> <com.apple.AuthKit/1 (com.apple.akd/1.0)>".to_string(),
+        akd_user_agent: "akd/1.0 CFNetwork/1494.0.7 Darwin/23.4.0".to_string(),
+        browser_user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)".to_string(),
+        hardware_headers: HashMap::from_iter([]),
+        push_token: None,
+        update_account_bundle_id: "<iMac13,1> <macOS;13.6.4;22G513> <com.apple.AppleAccount/1.0 (com.apple.systempreferences.AppleIDSettings/1)>".to_string(),
+    }, PathBuf::from_str("anisette_test").expect("test"));
+    println!("headers {:?}", default.lock().await.get_headers().await.expect("No headers??"));
+}
+
+
 #[cfg(target_os = "macos")]
 pub type DefaultAnisetteProvider = AOSKitAnisetteProvider<'static>;
 #[cfg(target_os = "macos")]
@@ -106,7 +130,7 @@ pub type ArcAnisetteClient<T> = Arc<Mutex<AnisetteClient<T>>>;
 
 
 pub struct AnisetteClient<T: AnisetteProvider> {
-    provider: T,
+    pub provider: T,
     cached_headers: HashMap<String, String>,
     generated_at: SystemTime,
 }

@@ -2,8 +2,8 @@ pub mod anisette;
 mod client;
 use std::fmt::Display;
 
-pub use client::{AppleAccount, LoginState, TrustedPhoneNumber, AuthenticationExtras, VerifyBody};
-pub use omnisette::{LoginClientInfo, ArcAnisetteClient};
+pub use client::{AppleAccount, LoginState, TrustedPhoneNumber, AuthenticationExtras, VerifyBody, CircleSendMessage};
+pub use omnisette::{LoginClientInfo, default_provider, ArcAnisetteClient, DefaultAnisetteProvider};
 
 use thiserror::Error;
 #[derive(Debug, Error)]
@@ -12,6 +12,8 @@ pub enum Error {
     Parse,
     #[error("Failed to authenticate.")]
     AuthSrp,
+    #[error("Failed to have a happy birthday!.")]
+    HappyBirthdayError,
     #[error("Bad 2fa code.")]
     Bad2faCode,
     #[error("{1} ({0})")]
