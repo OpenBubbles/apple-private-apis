@@ -208,9 +208,9 @@ impl<T: AnisetteProvider> AppleAccount<T> {
     pub fn new_with_anisette(client_info: LoginClientInfo, anisette:  ArcAnisetteClient<T>) -> Result<Self, crate::Error> {
         let client = ClientBuilder::new()
             .cookie_store(true)
-            // .add_root_certificate(Certificate::from_der(APPLE_ROOT)?)
             // .proxy(Proxy::https("https://192.168.86.82:8084").unwrap())
-            .danger_accept_invalid_certs(true)
+            .add_root_certificate(Certificate::from_der(APPLE_ROOT)?)
+            // .danger_accept_invalid_certs(true)
             .http1_title_case_headers()
             .connection_verbose(true)
             .build()?;
