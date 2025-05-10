@@ -399,9 +399,24 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         Ok(LoginState::LoggedIn)
     }
 
+    pub async fn logout_all(&mut self, device_name: &str) -> Result<(), Error> {
+        let mut services = vec!["icloud", "imessage", "facetime"];
+
+        while services.len() > 0 {
+            let service = services.remove(0);
+            self.update_postdata(device_name, Some(service), &services).await?;
+        }
+
+        self.update_postdata(device_name, Some("all"), &services).await?;
+
+        Ok(())
+    }
+
     pub async fn update_postdata(
         &mut self,
-        device_name: &str
+        device_name: &str,
+        logout: Option<&'static str>,
+        services: &[&'static str],
     ) -> Result<LoginState, Error> {
 
         let valid_anisette = self.get_anisette().await?;
@@ -419,33 +434,55 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         gsa_headers.insert("X-Apple-I-UrlSwitch-Info", HeaderValue::from_str(&base64::encode(format!("{}:postdata", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap()))).unwrap());
         gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap(), token))).unwrap());
 
-        let mut data = Dictionary::from_iter([
-            ("cdpStatus", Value::Boolean(true)),
-            ("cfuids", Value::Array(vec![])),
-            ("circleStatus", Value::Boolean(false)),
-            ("denyICloudWebAccess", Value::Boolean(true)),
-            ("dn", Value::String(device_name.to_string())),
-            ("event", Value::String("liveness".to_string())),
-            ("icloudMailEnabled", Value::Boolean(false)),
-            ("icscStatus", Value::Boolean(true)),
-            ("isLegacyContactAssignee", Value::Integer(1.into())),
-            ("isRecoveryContactAssignee", Value::Integer(1.into())),
-            ("loc", Value::String("en_US".to_string())),
-            ("otStatus", Value::Boolean(true)),
-            ("pkc", Value::String("1".to_string())),
-            ("prkgen", Value::Boolean(true)),
-            ("reason", Value::Integer(5.into())),
-            ("rep", Value::Integer(1.into())),
-            ("services", Value::Array(vec![Value::String("icloud".to_string()), Value::String("imessage".to_string())])),
-            ("signinPartition", Value::Integer(1.into())),
-            ("stingrayDisabledIndicator", Value::Boolean(false)),
-            ("usrt", Value::Integer(4.into())),
-            ("ut", Value::Integer(1.into())),
-        ]);
-
-        if let Some(ptkn) = &self.client_info.push_token {
-            data.insert("ptkn".to_string(), Value::String(ptkn.clone()));
-        }
+        let data = if let Some(logout) = logout {
+            gsa_headers.remove("X-Apple-I-Service-Type");
+            gsa_headers.remove("X-Apple-AK-DataRecoveryService-Status");
+            gsa_headers.remove("X-Apple-I-CDP-Status");
+            gsa_headers.remove("X-Apple-I-OT-Status");
+            gsa_headers.insert("X-Apple-I-CDP-Status", HeaderValue::from_str("false").unwrap());
+            gsa_headers.insert("X-Apple-I-OT-Status", HeaderValue::from_str("false").unwrap());
+            Dictionary::from_iter([
+                ("cdpStatus", Value::Boolean(false)),
+                ("circleStatus", Value::Boolean(false)),
+                ("dn", Value::String(device_name.to_string())),
+                ("event", Value::String(format!("signout-{logout}"))),
+                ("loc", Value::String("en_US".to_string())),
+                ("otStatus", Value::Boolean(false)),
+                ("prkgen", Value::Boolean(true)),
+                ("rep", Value::Integer(1.into())),
+                ("services", Value::Array(services.iter().map(|s| Value::String(s.to_string())).collect())),
+                ("ut", Value::Integer(1.into())),
+            ])
+        } else {
+            let mut data = Dictionary::from_iter([
+                ("cdpStatus", Value::Boolean(true)),
+                ("cfuids", Value::Array(vec![])),
+                ("circleStatus", Value::Boolean(false)),
+                ("denyICloudWebAccess", Value::Boolean(true)),
+                ("dn", Value::String(device_name.to_string())),
+                ("event", Value::String("liveness".to_string())),
+                ("icloudMailEnabled", Value::Boolean(false)),
+                ("icscStatus", Value::Boolean(true)),
+                ("isLegacyContactAssignee", Value::Integer(1.into())),
+                ("isRecoveryContactAssignee", Value::Integer(1.into())),
+                ("loc", Value::String("en_US".to_string())),
+                ("otStatus", Value::Boolean(true)),
+                ("pkc", Value::String("1".to_string())),
+                ("prkgen", Value::Boolean(true)),
+                ("reason", Value::Integer(5.into())),
+                ("rep", Value::Integer(1.into())),
+                ("services", Value::Array(services.iter().map(|s| Value::String(s.to_string())).collect())),
+                ("signinPartition", Value::Integer(1.into())),
+                ("stingrayDisabledIndicator", Value::Boolean(false)),
+                ("usrt", Value::Integer(4.into())),
+                ("ut", Value::Integer(1.into())),
+            ]);
+    
+            if let Some(ptkn) = &self.client_info.push_token {
+                data.insert("ptkn".to_string(), Value::String(ptkn.clone()));
+            }
+            data
+        };
 
         let packet = Dictionary::from_iter([
             ("Header", Value::Dictionary(Default::default())),
@@ -497,7 +534,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
         gsa_headers.insert("Accept", HeaderValue::from_str("*/*").unwrap());
         gsa_headers.extend(valid_anisette.get_takedown_headers().into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), HeaderValue::from_str(&b).unwrap())));
-        gsa_headers.insert("X-Apple-I-UrlSwitch-Info", HeaderValue::from_str(&base64::encode(format!("{}:postdata", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap()))).unwrap());
+        gsa_headers.insert("X-Apple-I-UrlSwitch-Info", HeaderValue::from_str(&base64::encode(format!("{}:teardown", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap()))).unwrap());
         gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap(), token))).unwrap());
 
         let mut data = Dictionary::from_iter([
@@ -826,7 +863,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
         Self::check_error(&res)?;
 
-        self.tokens = headers.get_all("X-Apple-GS-Token").iter().map(|header| {
+        self.tokens = headers.get_all("X-Apple-GS-Token").iter().chain(headers.get_all("X-Apple-HB-Token").iter()).map(|header| {
             let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
             let parts = decoded.split(":").collect::<Vec<&str>>();
             (parts[0].to_string(), FetchedToken {
@@ -862,9 +899,10 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             return Err(Error::Bad2faCode);
         }
 
-        self.tokens = res.headers().get_all("X-Apple-GS-Token").iter().map(|header| {
+        self.tokens = res.headers().get_all("X-Apple-GS-Token").iter().chain(res.headers().get_all("X-Apple-HB-Token").iter()).map(|header| {
             let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
             let parts = decoded.split(":").collect::<Vec<&str>>();
+            
             (parts[0].to_string(), FetchedToken {
                 token: parts[1].to_string(),
                 expiration: parts.get(3).expect("No epxiration date?").parse().expect("Bad expiration format?"),
@@ -881,7 +919,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
     fn parse_pet_header(&mut self, data: &str) {
         let decoded = String::from_utf8(base64::decode(data).unwrap()).unwrap();
-        self.tokens.insert("com.apple.gs.idms.pet".to_string(), FetchedToken { token: decoded.split(":").nth(1).unwrap().to_string(), expiration: decoded.split(":").nth(3).expect("No pet token").parse().expect("Bad pet format") });
+        self.tokens.insert("com.apple.gs.idms.pet".to_string(), FetchedToken { token: decoded.split(":").nth(1).unwrap().to_string(), expiration: (decoded.split(":").nth(2).expect("No pet token").parse::<u64>().expect("Bad pet format") * 1000u64) + (SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64) });
     }
 
     fn check_error(res: &plist::Dictionary) -> Result<(), Error> {
