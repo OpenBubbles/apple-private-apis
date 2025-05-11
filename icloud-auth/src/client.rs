@@ -90,7 +90,7 @@ pub struct AuthTokenRequest {
 
 pub struct FetchedToken {
     token: String,
-    expiration: u64,
+    expiration: SystemTime,
 }
 
 pub struct AppleAccount<T: AnisetteProvider> {
@@ -208,8 +208,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
     pub fn new_with_anisette(client_info: LoginClientInfo, anisette:  ArcAnisetteClient<T>) -> Result<Self, crate::Error> {
         let client = ClientBuilder::new()
             .cookie_store(true)
-            // .proxy(Proxy::https("https://192.168.86.82:8084").unwrap())
             .add_root_certificate(Certificate::from_der(APPLE_ROOT)?)
+            // .proxy(Proxy::https("https://192.168.86.82:8080").unwrap())
             // .danger_accept_invalid_certs(true)
             .http1_title_case_headers()
             .connection_verbose(true)
@@ -328,8 +328,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let has_valid_token = if !self.tokens.is_empty() {
             let data = self.tokens.get(token)?; // if it's not here, we don't have one
             
-            let time = SystemTime::UNIX_EPOCH + Duration::from_secs(data.expiration);
-            time.elapsed().is_err()
+            data.expiration.elapsed().is_err()
         } else {
             false
         };
@@ -695,7 +694,11 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             let keys: HashMap<String, FetchedToken> = dict.iter().filter_map(|(service, value)| {
                 Some((service.clone(), FetchedToken {
                     token: value.as_dictionary()?.get("token")?.as_string()?.to_string(),
-                    expiration: value.as_dictionary()?.get("expiry")?.as_unsigned_integer()?,
+                    expiration: if let Some(expiry) = value.as_dictionary()?.get("expiry") {
+                        SystemTime::UNIX_EPOCH + Duration::from_millis(expiry.as_unsigned_integer()?)
+                    } else {
+                        SystemTime::now() + Duration::from_secs(value.as_dictionary()?.get("duration")?.as_unsigned_integer()?)
+                    },
                 }))
             }).collect();
             self.tokens = keys;
@@ -863,12 +866,32 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
         Self::check_error(&res)?;
 
+        // this endpoint is stupid
+        // in the SMS 2fa endpoint, all tokens have format ID:TOKEN:DURATION:EXP (MS SINCE EPOCH)
+
+        // here, well, the PE token has no duration OR expiration (ID:TOKEN)
+        // the HB token has format ID:TOKEN:EXP
+        // and the GS tokens (I have checked, god knows there's one that has a different format to mess with me) have format ID:TOKEN:DURATION
+        // conclusion
+
+        // so what to do? Don't trust apple at all. For PET, assume 300s if no duration. For everything else, guess whether the token is epoch time or duration
+        // by seeing if the number is greater than 40 years in milliseconds. No token should reasonably have a duration longer than that (besides otherwise its in secs)
+
         self.tokens = headers.get_all("X-Apple-GS-Token").iter().chain(headers.get_all("X-Apple-HB-Token").iter()).map(|header| {
             let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
             let parts = decoded.split(":").collect::<Vec<&str>>();
+            let exp = parts.get(2).expect("No epxiration date?").parse().expect("Bad expiration format?");
+
+            let time = if exp > 40 * 365 * 24 * 60 * 60 * 1000 {
+                // ms since epoch
+                SystemTime::UNIX_EPOCH + Duration::from_millis(exp)
+            } else {
+                SystemTime::now() + Duration::from_secs(exp)
+            };
+
             (parts[0].to_string(), FetchedToken {
                 token: parts[1].to_string(),
-                expiration: parts.get(2).expect("No epxiration date?").parse().expect("Bad expiration format?"),
+                expiration: time,
             })
         }).collect();
 
@@ -902,10 +925,18 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         self.tokens = res.headers().get_all("X-Apple-GS-Token").iter().chain(res.headers().get_all("X-Apple-HB-Token").iter()).map(|header| {
             let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
             let parts = decoded.split(":").collect::<Vec<&str>>();
+
+            let exp = parts.get(3).unwrap_or(parts.get(2).expect("no epxiration")).parse().expect("Bad expiration format?");
+            let time = if exp > 40 * 365 * 24 * 60 * 60 * 1000 {
+                // ms since epoch
+                SystemTime::UNIX_EPOCH + Duration::from_millis(exp)
+            } else {
+                SystemTime::now() + Duration::from_secs(exp)
+            };
             
             (parts[0].to_string(), FetchedToken {
                 token: parts[1].to_string(),
-                expiration: parts.get(3).expect("No epxiration date?").parse().expect("Bad expiration format?"),
+                expiration: time,
             })
         }).collect();
 
@@ -919,7 +950,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
     fn parse_pet_header(&mut self, data: &str) {
         let decoded = String::from_utf8(base64::decode(data).unwrap()).unwrap();
-        self.tokens.insert("com.apple.gs.idms.pet".to_string(), FetchedToken { token: decoded.split(":").nth(1).unwrap().to_string(), expiration: (decoded.split(":").nth(2).expect("No pet token").parse::<u64>().expect("Bad pet format") * 1000u64) + (SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64) });
+        self.tokens.insert("com.apple.gs.idms.pet".to_string(), FetchedToken { token: decoded.split(":").nth(1).unwrap().to_string(), expiration: SystemTime::now() + Duration::from_secs(decoded.split(":").nth(2).map(|a| a.parse::<u64>().expect("Bad pet format")).unwrap_or(300)) });
     }
 
     fn check_error(res: &plist::Dictionary) -> Result<(), Error> {
