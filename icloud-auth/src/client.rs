@@ -209,8 +209,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let client = ClientBuilder::new()
             .cookie_store(true)
             .add_root_certificate(Certificate::from_der(APPLE_ROOT)?)
-            // .proxy(Proxy::https("https://192.168.86.82:8080").unwrap())
-            // .danger_accept_invalid_certs(true)
+            .proxy(Proxy::https("https://192.168.86.82:8080").unwrap())
+            .danger_accept_invalid_certs(true)
             .http1_title_case_headers()
             .connection_verbose(true)
             .build()?;
@@ -880,7 +880,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         self.tokens = headers.get_all("X-Apple-GS-Token").iter().chain(headers.get_all("X-Apple-HB-Token").iter()).map(|header| {
             let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
             let parts = decoded.split(":").collect::<Vec<&str>>();
-            let exp = parts.get(2).expect("No epxiration date?").parse().expect("Bad expiration format?");
+            let exp = parts.get(2).map(|i| i.parse().expect("Bad expiration format?")).unwrap_or(31536000);
 
             let time = if exp > 40 * 365 * 24 * 60 * 60 * 1000 {
                 // ms since epoch
@@ -926,7 +926,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
             let parts = decoded.split(":").collect::<Vec<&str>>();
 
-            let exp = parts.get(3).unwrap_or(parts.get(2).expect("no epxiration")).parse().expect("Bad expiration format?");
+            // default one year; this won't bite me in the back at all...
+            let exp = parts.get(3).or(parts.get(2)).map(|i| i.parse().expect("Bad expiration format?")).unwrap_or(31536000);
             let time = if exp > 40 * 365 * 24 * 60 * 60 * 1000 {
                 // ms since epoch
                 SystemTime::UNIX_EPOCH + Duration::from_millis(exp)
