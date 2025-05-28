@@ -104,6 +104,7 @@ pub struct AppleAccount<T: AnisetteProvider> {
     client: Client,
     pub tokens: HashMap<String, FetchedToken>,
     pub hashed_password: Option<Vec<u8>>,
+    pub nextstep: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -223,6 +224,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             username: None,
             tokens: HashMap::new(),
             hashed_password: None,
+            nextstep: None,
         })
     }
 
@@ -680,6 +682,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         if err_check.is_err() {
             return Err(err_check.err().unwrap());
         }
+        self.nextstep = err_check.unwrap();
         // println!("{:?}", res);
         let m2 = res.get("M2").unwrap().as_data().unwrap();
         verifier.verify_server(&m2).unwrap();
@@ -846,6 +849,21 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         Ok(text)
     }
 
+    pub async fn request_repair_account(&self, nas_qualify: &str) -> Result<(String, String), Error> {
+        let headers: HeaderMap = self.build_2fa_headers(true).await?;
+
+        let text = self.client.get("https://gsa.apple.com/appleid/account/manage/repair")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .header("X-MMe-Nas-Qualify", nas_qualify)
+            .header("X-Apple-I-Service-Type", "icloud")
+            .headers(headers)
+            .send().await?;
+
+        let url = text.url().as_str().to_string();
+
+        Ok((url, text.text().await?))
+    }
+
     pub async fn verify_2fa(&mut self, code: String) -> Result<LoginState, Error> {
         let headers = self.build_2fa_headers(false);
         // println!("Recieved code: {}", code);
@@ -864,7 +882,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let res: plist::Dictionary =
             plist::from_bytes(res.text().await?.as_bytes())?;
 
-        Self::check_error(&res)?;
+        self.nextstep = Self::check_error(&res)?;
 
         // this endpoint is stupid
         // in the SMS 2fa endpoint, all tokens have format ID:TOKEN:DURATION:EXP (MS SINCE EPOCH)
@@ -954,7 +972,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         self.tokens.insert("com.apple.gs.idms.pet".to_string(), FetchedToken { token: decoded.split(":").nth(1).unwrap().to_string(), expiration: SystemTime::now() + Duration::from_secs(decoded.split(":").nth(2).map(|a| a.parse::<u64>().expect("Bad pet format")).unwrap_or(300)) });
     }
 
-    fn check_error(res: &plist::Dictionary) -> Result<(), Error> {
+    fn check_error(res: &plist::Dictionary) -> Result<Option<String>, Error> {
         let res = match res.get("Status") {
             Some(plist::Value::Dictionary(d)) => d,
             _ => &res,
@@ -967,7 +985,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             ));
         }
 
-        Ok(())
+        Ok(res.get("au").map(|a| a.as_string().unwrap().to_string()))
     }
 
     // pub async 
