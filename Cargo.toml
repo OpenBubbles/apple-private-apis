@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "omnisette",
-    "icloud-auth"
+    "icloud-auth",
+    "icloud-auth/rustcrypto-srp"
 ]
