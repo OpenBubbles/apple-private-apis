@@ -110,7 +110,7 @@ pub struct AppleAccount<T: AnisetteProvider> {
 pub struct CircleSendMessage {
     pub atxid: String,
     pub circlestep: u32,
-    pub idmsdata: String,
+    pub idmsdata: Option<String>,
     pub pakedata: String,
     pub ptkn: String,
     pub ec: Option<i32>,
@@ -350,7 +350,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
     pub async fn circle(
         &mut self,
-        message: &CircleSendMessage
+        message: &CircleSendMessage,
+        is_twofa: bool,
     ) -> Result<LoginState, Error> {
 
         let valid_anisette = self.get_anisette().await?;
@@ -361,12 +362,21 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             HeaderValue::from_str("text/x-xml-plist").unwrap(),
         );
 
-        let token = self.get_token("com.apple.gs.idms.hb").await.ok_or(Error::HappyBirthdayError)?;
-
         gsa_headers.insert("Accept", HeaderValue::from_str("*/*").unwrap());
         gsa_headers.extend(valid_anisette.get_circle_headers().into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), HeaderValue::from_str(&b).unwrap())));
-        gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap(), token))).unwrap());
+        
+        if is_twofa {
+            let spd = self.spd.as_ref().unwrap();
+            let dsid = spd.get("adsid").unwrap().as_string().unwrap();
+            let token = spd.get("GsIdmsToken").unwrap().as_string().unwrap();
 
+            let identity_token = base64::encode(format!("{}:{}", dsid, token));
+            gsa_headers.insert("X-Apple-Identity-Token", HeaderValue::from_str(&identity_token).unwrap());
+        } else {
+            let token = self.get_token("com.apple.gs.idms.hb").await.ok_or(Error::HappyBirthdayError)?;
+            gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap(), token))).unwrap());
+        }
+        
         let data = plist::to_value(&message)?;
 
         let packet = Dictionary::from_iter([
@@ -456,7 +466,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             let mut data = Dictionary::from_iter([
                 ("cdpStatus", Value::Boolean(true)),
                 ("cfuids", Value::Array(vec![])),
-                ("circleStatus", Value::Boolean(false)),
+                ("circleStatus", Value::Boolean(true)),
                 ("denyICloudWebAccess", Value::Boolean(true)),
                 ("dn", Value::String(device_name.to_string())),
                 ("event", Value::String("liveness".to_string())),
@@ -632,7 +642,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         }
         // println!("{:?}", res);
         let salt = res.get("s").unwrap().as_data().unwrap();
-        let b_pub = res.get("B").unwrap().as_data().unwrap();
+        let b_pub = res.get("B").unwrap().as_data().unwrap(); // got this
         let iters = res.get("i").unwrap().as_signed_integer().unwrap();
         let c = res.get("c").unwrap().as_string().unwrap();
 
@@ -646,7 +656,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         );
 
         let verifier: SrpClientVerifier<Sha256> = srp_client
-            .process_reply(&a, &username.as_bytes(), &password_buf, salt, b_pub)
+            .process_reply(&a, &username.as_bytes(), &password_buf, salt, b_pub, true)
             .unwrap();
 
         let m = verifier.proof();

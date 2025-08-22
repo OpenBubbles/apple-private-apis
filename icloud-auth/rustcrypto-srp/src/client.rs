@@ -184,6 +184,7 @@ impl<'a, D: Digest> SrpClient<'a, D> {
         password: &[u8],
         salt: &[u8],
         b_pub: &[u8],
+        is_gsa_empty_hash: bool,
     ) -> Result<SrpClientVerifier<D>, SrpAuthError> {
         let a = BigUint::from_bytes_be(a);
         // let a_pub = BigUint::from_bytes_be(&a_pub_bytes);
@@ -198,7 +199,7 @@ impl<'a, D: Digest> SrpClient<'a, D> {
 
         let u = compute_u::<D>(&a_pub.to_bytes_be(), &b_pub.to_bytes_be());
         let k = compute_k::<D>(self.params);
-        let identity_hash = Self::compute_identity_hash(&[], password);
+        let identity_hash = Self::compute_identity_hash(if is_gsa_empty_hash { &[] } else { username }, password);
         let x = Self::compute_x(identity_hash.as_slice(), salt);
 
         let key = self.compute_premaster_secret(&b_pub, &k, &x, &a, &u);
