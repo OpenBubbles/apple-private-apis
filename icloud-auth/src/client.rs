@@ -111,7 +111,7 @@ pub struct CircleSendMessage {
     pub atxid: String,
     pub circlestep: u32,
     pub idmsdata: Option<String>,
-    pub pakedata: String,
+    pub pakedata: Option<String>,
     pub ptkn: String,
     pub ec: Option<i32>,
 }
@@ -155,6 +155,11 @@ pub struct VerifyBody {
     mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     security_code: Option<VerifyCode>
+}
+
+#[derive(Deserialize)]
+pub struct CircleResponse {
+    pub sid: Option<String>,
 }
 
 #[repr(C)]
@@ -209,7 +214,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let client = ClientBuilder::new()
             .cookie_store(true)
             .add_root_certificate(Certificate::from_der(APPLE_ROOT)?)
-            // .proxy(Proxy::https("https://192.168.86.82:8080").unwrap())
+            // .proxy(Proxy::https("https://192.168.99.87:8080").unwrap())
             // .danger_accept_invalid_certs(true)
             .http1_title_case_headers()
             .connection_verbose(true)
@@ -352,7 +357,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         &mut self,
         message: &CircleSendMessage,
         is_twofa: bool,
-    ) -> Result<LoginState, Error> {
+    ) -> Result<CircleResponse, Error> {
 
         let valid_anisette = self.get_anisette().await?;
 
@@ -405,7 +410,9 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             return Err(Error::AuthSrp)
         }
 
-        Ok(LoginState::LoggedIn)
+        let response = res.bytes().await?;
+
+        Ok(plist::from_bytes(&response)?)
     }
 
     pub async fn logout_all(&mut self, device_name: &str) -> Result<(), Error> {
@@ -779,7 +786,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
         let res = self
             .client
-            .put("https://gsa.apple.com/auth/verify/phone/")
+            .put("https://gsa.apple.com/auth/verify/phone")
             .headers(headers.await?)
             .header("Accept", "application/json")
             .json(&body)
