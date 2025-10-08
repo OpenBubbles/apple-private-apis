@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 async = ["dep:async-trait"]
-default = ["dep:remove-async-await", "async"]
+default = ["dep:remove-async-await", "async", "remote-clearadi"]
 remote-anisette-v3 = ["async", "dep:tokio-tungstenite", "dep:futures-util"]
 remote-clearadi = ["async", "dep:clearadi"]
 
@@ -29,7 +29,7 @@ futures-util = { version = "0.3.28", optional = true }
 chrono = { version = "0.4.37" }
 thiserror = "1.0.58"
 anyhow = "1.0.81"
-clearadi = { path = "../clearadi", optional = true }
+clearadi = { path = "/home/tae/Documents/clearadi", optional = true }
 tokio = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]

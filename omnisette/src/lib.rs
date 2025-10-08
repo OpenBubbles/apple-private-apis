@@ -107,7 +107,7 @@ async fn test_adi() {
         ak_context_type: "imessage".to_string(),
         client_app_name: "Messages".to_string(),
         client_bundle_id: "com.apple.MobileSMS".to_string(),
-        mme_client_info: "<iMac13,1> <macOS;13.6.4;22G513> <com.apple.AuthKit/1 (com.apple.MobileSMS/1262.500.151.1.2)>".to_string(),
+        mme_client_info: "<iPhone7,2> <iPhone OS;12.5.5;16H62> <com.apple.akd/1.0 (com.apple.akd/1.0)>".to_string(),
         mme_client_info_akd: "<iMac13,1> <macOS;13.6.4;22G513> <com.apple.AuthKit/1 (com.apple.akd/1.0)>".to_string(),
         akd_user_agent: "akd/1.0 CFNetwork/1494.0.7 Darwin/23.4.0".to_string(),
         browser_user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)".to_string(),

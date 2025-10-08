@@ -5,7 +5,7 @@ use std::{collections::HashMap, fs, io::Cursor, path::PathBuf};
 
 use base64::engine::general_purpose;
 use chrono::{DateTime, SubsecRound, Utc};
-use clearadi::{ProvisionedMachine, ProvisioningSession};
+use clearadi::{AnisetteFlavor, ProvisionedMachine, ProvisioningSession};
 use log::debug;
 use plist::{Data, Dictionary};
 use reqwest::{Certificate, Client, ClientBuilder, Proxy, RequestBuilder};
@@ -85,14 +85,34 @@ pub struct ProvisionedAnisette {
     mid: Data,
     metadata: Data,
     rinfo: String,
+    #[serde(default)]
+    flavor: ProvisionedFlavor,
 }
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub enum ProvisionedFlavor {
+    #[default]
+    Mac,
+    IOS,
+}
+
+impl ProvisionedFlavor {
+    fn anisette(&self) -> AnisetteFlavor {
+        match self {
+            Self::Mac => AnisetteFlavor::Mac,
+            Self::IOS => AnisetteFlavor::IOS,
+        }
+    }
+}
+
 impl ProvisionedAnisette {
-    fn new(machine: ProvisionedMachine, rinfo: &str) -> ProvisionedAnisette {
+    fn new(machine: ProvisionedMachine, rinfo: &str, flavor: ProvisionedFlavor) -> ProvisionedAnisette {
         ProvisionedAnisette {
             client_secret: machine.client_secret.to_vec().into(),
             mid: machine.mid.to_vec().into(),
             metadata: machine.metadata.to_vec().into(),
             rinfo: rinfo.to_string(),
+            flavor,
         }
     }
 
@@ -101,6 +121,7 @@ impl ProvisionedAnisette {
             client_secret: self.client_secret.as_ref().try_into().unwrap(),
             mid: self.mid.as_ref().try_into().unwrap(),
             metadata: self.metadata.as_ref().try_into().unwrap(),
+            flavor: self.flavor.anisette(),
         }
     }
 }
@@ -171,7 +192,7 @@ impl AnisetteData {
             ("X-Apple-I-TimeZone".to_string(), "UTC".to_string()),
             ("X-Apple-Locale".to_string(), "en_US".to_string()),
             ("X-Apple-I-MD-RINFO".to_string(), self.routing_info.clone()),
-            ("X-Apple-I-MD-LU".to_string(), self.local_user_id.clone()),
+            // ("X-Apple-I-MD-LU".to_string(), self.local_user_id.clone()),
             ("X-Mme-Device-Id".to_string(), self.device_unique_identifier.clone()),
             ("X-Apple-I-MD".to_string(), self.one_time_password.clone()),
             ("X-Apple-I-MD-M".to_string(), self.machine_id.clone()),
@@ -184,7 +205,7 @@ fn make_reqwest() -> Result<Client, AnisetteError> {
     Ok(ClientBuilder::new()
         .http1_title_case_headers()
         .add_root_certificate(Certificate::from_der(APPLE_ROOT)?)
-        // .proxy(Proxy::https("https://192.168.0.200:8080").unwrap())
+        // .proxy(Proxy::https("https://192.168.99.87:8080").unwrap())
         // .danger_accept_invalid_certs(true)
         .build()?)
 }
@@ -255,8 +276,14 @@ impl ClearADIClient {
         let spim = base64_decode(protocol_val.as_dictionary().unwrap().get("Response").unwrap().as_dictionary().unwrap()
         .get("spim").unwrap().as_string().unwrap());
 
+        let flavor = if self.login_info.mme_client_info.contains("iPhone OS") {
+            ProvisionedFlavor::IOS
+        } else {
+            ProvisionedFlavor::Mac
+        };
+
         // TODO hostuuid
-        let (session, cpim) = ProvisioningSession::new(&spim, &[], -2 /* GSA */)?;
+        let (session, cpim) = ProvisioningSession::new(&spim, &[], -2 /* GSA */, flavor.anisette())?;
         
         let body_data = ProvisionBodyData { header: Dictionary::new(), request: Dictionary::from_iter([("cpim", base64_encode(&cpim))].into_iter()) };
         let resp = self.build_apple_request(state, http_client.post(end_provisioning_url))
@@ -273,7 +300,7 @@ impl ClearADIClient {
 
         let machine = session.finish(&base64_decode(tk), &base64_decode(ptm))?;
 
-        state.provisioned = Some(ProvisionedAnisette::new(machine, rinfo));
+        state.provisioned = Some(ProvisionedAnisette::new(machine, rinfo, flavor));
 
         Ok(())
     }
