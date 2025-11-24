@@ -1,4 +1,4 @@
-use std::{error::Error, ffi, fmt::Display, ptr::null_mut, slice};
+use std::{error::Error, ffi, fmt::Display};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,10 +11,17 @@ impl Display for ClearAdiError {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub enum AnisetteFlavor {
+    Mac,
+    IOS
+}
+
 pub struct ProvisionedMachine {
     pub client_secret: [u8; 32],
     pub mid: [u8; 60],
     pub metadata: Vec<u8>,
+    pub flavor: AnisetteFlavor,
 }
 
 impl ProvisionedMachine {
@@ -41,11 +48,11 @@ pub struct ProvisioningSession(*mut ffi::c_void);
 unsafe impl Send for ProvisioningSession { }
 
 impl ProvisioningSession {
-    pub fn new(spim: &[u8], _hostuuid: &[u8], _dsid: i64) -> Result<(Self, Vec<u8>), ClearAdiError> {
+    pub fn new(_spim: &[u8], _hostuuid: &[u8], _dsid: i64, _flavor: AnisetteFlavor) -> Result<(Self, Vec<u8>), ClearAdiError> {
         todo!()
     }
 
-    pub fn finish(self, tk: &[u8], ptm: &[u8]) -> Result<ProvisionedMachine, ClearAdiError> {
+    pub fn finish(self, _tk: &[u8], _ptm: &[u8]) -> Result<ProvisionedMachine, ClearAdiError> {
         todo!()
     }
 }
