@@ -16,7 +16,7 @@ use srp::{
     client::{SrpClient, SrpClientVerifier},
     groups::G_2048,
 };
-use log::error;
+use log::{debug, error, warn};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -214,7 +214,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let client = ClientBuilder::new()
             .cookie_store(true)
             .add_root_certificate(Certificate::from_der(APPLE_ROOT)?)
-            // .proxy(Proxy::https("https://192.168.99.87:8080").unwrap())
+            // .proxy(Proxy::https("https://192.168.99.71:8080").unwrap())
             // .danger_accept_invalid_certs(true)
             .http1_title_case_headers()
             .connection_verbose(true)
@@ -232,7 +232,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
     }
 
     pub async fn login(
-        appleid_closure: impl Fn() -> (String, String),
+        appleid_closure: impl Fn() -> (String, Vec<u8>),
         tfa_closure: impl Fn() -> String,
         client_info: LoginClientInfo,
         anisette: ArcAnisetteClient<T>
@@ -276,7 +276,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
     /// ```
     /// Note: You would not provide the 2FA code like this, you would have to actually ask input for it.
     //TODO: add login_with_anisette and login, where login autodetcts anisette
-    pub async fn login_with_anisette<F: Fn() -> (String, String), G: Fn() -> String>(
+    pub async fn login_with_anisette<F: Fn() -> (String, Vec<u8>), G: Fn() -> String>(
         appleid_closure: F,
         tfa_closure: G,
         client_info: LoginClientInfo,
@@ -285,11 +285,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let mut _self = AppleAccount::new_with_anisette(client_info, anisette)?;
         let (username, password) = appleid_closure();
 
-        let mut password_hasher = sha2::Sha256::new();
-        password_hasher.update(&password.as_bytes());
-        let hashed_password = password_hasher.finalize();
-
-        let mut response = _self.login_email_pass(&username, &hashed_password).await?;
+        let mut response = _self.login_email_pass(&username, &password).await?;
         loop {
             match response {
                 // LoginState::NeedsDevice2FA => response = _self.send_2fa_to_devices().await?,
@@ -304,7 +300,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
                     response = _self.verify_sms_2fa(tfa_closure(), body).await?
                 }
                 LoginState::NeedsLogin => {
-                    response = _self.login_email_pass(&username, &hashed_password).await?
+                    response = _self.login_email_pass(&username, &password).await?
                 }
                 LoginState::LoggedIn => return Ok(_self),
                 LoginState::NeedsExtraStep(step) => {
@@ -720,7 +716,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             }).collect();
             self.tokens = keys;
         }
-        println!("spd {:?}", decoded_spd);
+        debug!("spd {:?}", decoded_spd);
 
         self.username = Some(decoded_spd.get("acname").expect("No account name?").as_string().unwrap().to_string());
         self.spd = Some(decoded_spd);
@@ -808,6 +804,11 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             .header("Accept", "application/json")
             .send().await?;
         let status = req.status().as_u16();
+        if status == 403 {
+            let body = req.bytes().await?;
+            warn!("Got auth response {}", base64::encode(&body));
+            return Err(Error::FailedGetting2FAConfig);
+        }
         let mut new_state = req.json::<AuthenticationExtras>().await?;
         if status == 201 {
             new_state.new_state = Some(LoginState::NeedsSMS2FAVerification(VerifyBody {

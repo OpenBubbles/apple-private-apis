@@ -27,5 +27,7 @@ pub enum Error {
     #[error("Request failed {0}")]
     ReqwestError(#[from] reqwest::Error),
     #[error("Failed getting anisette data {0}")]
-    ErrorGettingAnisette(#[from] omnisette::AnisetteError)
+    ErrorGettingAnisette(#[from] omnisette::AnisetteError),
+    #[error("Disable Advanced Data Protection")]
+    FailedGetting2FAConfig,
 }
