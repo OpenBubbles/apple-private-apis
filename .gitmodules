@@ -1,0 +1,3 @@
+[submodule "clearadi"]
+	path = clearadi
+	url = git@github.com:OpenBubbles/clearadi-stub.git
