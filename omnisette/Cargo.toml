@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 async = ["dep:async-trait"]
-default = ["dep:remove-async-await", "async", "remote-clearadi"]
+default = ["dep:remove-async-await", "async"]
 remote-anisette-v3 = ["async", "dep:tokio-tungstenite", "dep:futures-util"]
 remote-clearadi = ["async", "dep:clearadi"]
 
