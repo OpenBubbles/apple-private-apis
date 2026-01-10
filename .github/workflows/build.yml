@@ -12,7 +12,9 @@ jobs:
     name: ${{ matrix.os }} with ${{ matrix.features }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable

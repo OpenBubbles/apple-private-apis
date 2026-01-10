@@ -16,7 +16,7 @@ use srp::{
     client::{SrpClient, SrpClientVerifier},
     groups::G_2048,
 };
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -175,6 +175,7 @@ pub struct TrustedPhoneNumber {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthenticationExtras {
+    #[serde(default)]
     pub trusted_phone_numbers: Vec<TrustedPhoneNumber>,
     pub recovery_url: Option<String>,
     pub cant_use_phone_number_url: Option<String>,
@@ -809,7 +810,12 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             warn!("Got auth response {}", base64::encode(&body));
             return Err(Error::FailedGetting2FAConfig);
         }
-        let mut new_state = req.json::<AuthenticationExtras>().await?;
+        let resp = req.bytes().await?;
+        info!("Got gsa auth extras {:?}", str::from_utf8(&resp).unwrap());
+        let mut new_state: AuthenticationExtras = serde_json::from_slice(&resp)?;
+        if new_state.trusted_phone_numbers.is_empty() {
+            return Err(Error::HardwareKeyError);
+        }
         if status == 201 {
             new_state.new_state = Some(LoginState::NeedsSMS2FAVerification(VerifyBody {
                 phone_number: PhoneNumber {

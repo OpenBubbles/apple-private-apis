@@ -30,4 +30,8 @@ pub enum Error {
     ErrorGettingAnisette(#[from] omnisette::AnisetteError),
     #[error("Disable Advanced Data Protection")]
     FailedGetting2FAConfig,
+    #[error("Serde Error")]
+    SerdeError(#[from] serde_json::Error),
+    #[error("Disable hardware authentication keys and try again!")]
+    HardwareKeyError,
 }
