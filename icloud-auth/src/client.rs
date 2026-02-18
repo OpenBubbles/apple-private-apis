@@ -11,6 +11,7 @@ use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue}, Certificate, Client, ClientBuilder, Proxy, Response
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use srp::{
     client::{SrpClient, SrpClientVerifier},
@@ -155,6 +156,14 @@ pub struct VerifyBody {
     mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     security_code: Option<VerifyCode>
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum GenerateVerificationTokenRequest {
+    Passkey {
+        client_data_hash: String,
+    }
 }
 
 #[derive(Deserialize)]
@@ -348,6 +357,42 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         }
 
         Some(self.tokens.get(token)?.token.to_string())
+    }
+
+    pub async fn generate_verification_token(&mut self, request: GenerateVerificationTokenRequest) -> Result<String, Error> {
+        let valid_anisette = self.get_anisette().await?;
+
+        let mut gsa_headers = HeaderMap::new();
+
+        gsa_headers.insert("Accept", HeaderValue::from_str("*/*").unwrap());
+        gsa_headers.extend(valid_anisette.get_generate_headers().into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), HeaderValue::from_str(&b).unwrap())));
+        
+        let token = self.get_token("com.apple.gs.idms.hb").await.ok_or(Error::HappyBirthdayError)?;
+        gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap(), token))).unwrap());
+        gsa_headers.insert("X-Apple-I-UrlSwitch-Info", HeaderValue::from_str(&base64::encode(format!("{}:generateVerificationToken", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap()))).unwrap());
+        
+
+        // println!("{:?}", gsa_headers.clone());
+        // println!("{:?}", buffer);
+
+        let res = self
+            .client
+            .post("https://gsa.apple.com/grandslam/ws/common/generateVerificationToken")
+            .headers(gsa_headers.clone())
+            .json(&json!({
+                "apd": request
+            }))
+            .send().await?;
+
+        if !res.status().is_success() {
+            return Err(Error::AuthSrp)
+        }
+
+        let header = res.headers().get("X-Apple-I-GS-Token").expect("No GS Token!");
+
+        let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
+
+        Ok(decoded)
     }
 
     pub async fn circle(

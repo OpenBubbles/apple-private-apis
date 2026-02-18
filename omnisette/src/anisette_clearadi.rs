@@ -1,7 +1,7 @@
 
 // Implementing the SideStore Anisette v3 protocol
 
-use std::{collections::HashMap, fs, io::Cursor, path::PathBuf};
+use std::{collections::HashMap, fs, io::Cursor, path::PathBuf, time::SystemTime};
 
 use base64::engine::general_purpose;
 use chrono::{DateTime, SubsecRound, Utc};
@@ -357,5 +357,3 @@ impl AnisetteProvider for ClearADIClient {
         Ok(data.get_headers())
     }
 }
-
-
