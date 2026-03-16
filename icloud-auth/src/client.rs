@@ -696,9 +696,22 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let c = res.get("c").unwrap().as_string().unwrap();
 
         self.hashed_password = Some(hashed_password.to_vec());
+
+        // Check which SRP protocol the server selected
+        let selected_protocol = res.get("sp").and_then(|v| v.as_string()).unwrap_or("s2k");
+
+        let password_for_srp: Vec<u8> = if selected_protocol == "s2k_fo" {
+            // s2k_fo: hex-encode the already-SHA256'd password bytes.
+            // hashed_password is already SHA256(raw_password), so just hex-encode it.
+            hashed_password.iter().map(|b| format!("{:02x}", b)).collect::<String>().into_bytes()
+        } else {
+            // s2k: use the SHA256-hashed password bytes directly
+            hashed_password.to_vec()
+        };
+        
         let mut password_buf = [0u8; 32];
         pbkdf2::pbkdf2::<hmac::Hmac<Sha256>>(
-            &hashed_password,
+            &password_for_srp,
             salt,
             iters as u32,
             &mut password_buf,
@@ -808,6 +821,9 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             .send().await?;
 
         if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            error!("send_2fa_to_devices failed: HTTP {} — body: {}", status, body);
             return Err(Error::AuthSrp);
         }
 
