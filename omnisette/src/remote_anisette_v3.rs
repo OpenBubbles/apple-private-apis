@@ -176,7 +176,7 @@ impl From<plist::Error> for ProvisionAttemptError {
 
 impl From<reqwest::Error> for ProvisionAttemptError {
     fn from(error: reqwest::Error) -> Self {
-        Self::Fatal(AnisetteError::ReqwestError(error))
+        Self::Retryable(AnisetteError::ReqwestError(error))
     }
 }
 
@@ -188,7 +188,7 @@ impl From<serde_json::Error> for ProvisionAttemptError {
 
 impl From<tokio_tungstenite::tungstenite::error::Error> for ProvisionAttemptError {
     fn from(error: tokio_tungstenite::tungstenite::error::Error) -> Self {
-        Self::Fatal(AnisetteError::WsError(error))
+        Self::Retryable(AnisetteError::WsError(error))
     }
 }
 
@@ -345,7 +345,11 @@ impl AnisetteClient {
             }
         }
 
-        Err(last_error.expect("provisioning retry loop must record a failure"))
+        Err(last_error.unwrap_or_else(|| {
+            AnisetteError::ProvisioningServerError(
+                "provisioning did not complete and did not report an error".into(),
+            )
+        }))
     }
 
     async fn provision_once(&self, state: &mut AnisetteState) -> Result<(), ProvisionAttemptError> {
