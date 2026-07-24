@@ -168,6 +168,30 @@ impl From<AnisetteError> for ProvisionAttemptError {
     }
 }
 
+impl From<plist::Error> for ProvisionAttemptError {
+    fn from(error: plist::Error) -> Self {
+        Self::Fatal(AnisetteError::PlistError(error))
+    }
+}
+
+impl From<reqwest::Error> for ProvisionAttemptError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Fatal(AnisetteError::ReqwestError(error))
+    }
+}
+
+impl From<serde_json::Error> for ProvisionAttemptError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Fatal(AnisetteError::SerdeError(error))
+    }
+}
+
+impl From<tokio_tungstenite::tungstenite::error::Error> for ProvisionAttemptError {
+    fn from(error: tokio_tungstenite::tungstenite::error::Error) -> Self {
+        Self::Fatal(AnisetteError::WsError(error))
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct ProvisionBodyData {
