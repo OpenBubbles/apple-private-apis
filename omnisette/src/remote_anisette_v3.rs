@@ -1,13 +1,13 @@
 
 // Implementing the SideStore Anisette v3 protocol
 
-use std::{collections::HashMap, fs, io::Cursor, path::PathBuf};
+use std::{collections::HashMap, fs, io::Cursor, path::PathBuf, time::Duration};
 
 use base64::engine::general_purpose;
 use chrono::{DateTime, SubsecRound, Utc};
-use log::debug;
+use log::{debug, warn};
 use plist::{Data, Dictionary};
-use reqwest::{Certificate, Client, ClientBuilder, Proxy, RequestBuilder};
+use reqwest::{Certificate, Client, ClientBuilder, RequestBuilder};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use rand::Rng;
 use sha2::{Sha256, Digest};
@@ -16,11 +16,13 @@ use uuid::Uuid;
 use futures_util::{stream::StreamExt, SinkExt};
 use std::fmt::Write;
 use base64::Engine;
-use async_trait::async_trait;
+use tokio::time::sleep;
 
 use crate::{AnisetteError, AnisetteProvider, LoginClientInfo};
 
 const APPLE_ROOT: &[u8] = include_bytes!("../../icloud-auth/src/apple_root.der");
+const MAX_PROVISION_ATTEMPTS: usize = 3;
+const PROVISION_RETRY_DELAY: Duration = Duration::from_millis(750);
 
 fn plist_to_string<T: serde::Serialize>(value: &T) -> Result<String, plist::Error> {
     plist_to_buf(value).map(|val| String::from_utf8(val).unwrap())
@@ -119,6 +121,51 @@ impl AnisetteState {
 pub struct AnisetteClient {
     login_info: LoginClientInfo,
     url: String
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "result")]
+enum ProvisionInput {
+    GiveIdentifier,
+    GiveStartProvisioningData,
+    GiveEndProvisioningData { cpim: String },
+    ProvisioningSuccess { adi_pb: String },
+    Wait,
+    CurrentlyStartingProvisioning,
+    CurrentlyEndingProvisioning,
+    TextOnly,
+    WebsocketError { message: String },
+    ClosingPerRequest,
+    Timeout,
+    InvalidIdentifier { message: String },
+    StartProvisioningError { message: String },
+    EndProvisioningError { message: String },
+}
+
+impl ProvisionInput {
+    fn server_error(&self) -> Option<(bool, String)> {
+        match self {
+            ProvisionInput::TextOnly => Some((false, "server requires text WebSocket frames".into())),
+            ProvisionInput::WebsocketError { message } => Some((true, format!("WebSocket error: {message}"))),
+            ProvisionInput::ClosingPerRequest => Some((false, "server closed the provisioning session per request".into())),
+            ProvisionInput::Timeout => Some((true, "server timed out the provisioning session".into())),
+            ProvisionInput::InvalidIdentifier { message } => Some((false, format!("invalid identifier: {message}"))),
+            ProvisionInput::StartProvisioningError { message } => Some((true, format!("start provisioning failed: {message}"))),
+            ProvisionInput::EndProvisioningError { message } => Some((true, format!("end provisioning failed: {message}"))),
+            _ => None,
+        }
+    }
+}
+
+enum ProvisionAttemptError {
+    Fatal(AnisetteError),
+    Retryable(AnisetteError),
+}
+
+impl From<AnisetteError> for ProvisionAttemptError {
+    fn from(error: AnisetteError) -> Self {
+        Self::Fatal(error)
+    }
 }
 
 #[derive(Serialize)]
@@ -237,7 +284,9 @@ impl AnisetteClient {
                 if message.contains("-45061") {
                     Err(AnisetteError::AnisetteNotProvisioned)
                 } else {
-                    panic!("Unknown error {}", message)
+                    Err(AnisetteError::ProvisioningServerError(format!(
+                        "get_headers failed: {message}"
+                    )))
                 }
             },
             AnisetteHeaders::Headers { machine_id, one_time_password, routing_info } => {
@@ -254,6 +303,28 @@ impl AnisetteClient {
     }
 
     pub async fn provision(&self, state: &mut AnisetteState) -> Result<(), AnisetteError> {
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_PROVISION_ATTEMPTS {
+            match self.provision_once(state).await {
+                Ok(()) => return Ok(()),
+                Err(ProvisionAttemptError::Fatal(error)) => return Err(error),
+                Err(ProvisionAttemptError::Retryable(error)) => {
+                    warn!(
+                        "Anisette provisioning attempt {attempt}/{MAX_PROVISION_ATTEMPTS} failed: {error}. State is preserved."
+                    );
+                    last_error = Some(error);
+                    if attempt < MAX_PROVISION_ATTEMPTS {
+                        sleep(PROVISION_RETRY_DELAY * attempt as u32).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error.expect("provisioning retry loop must record a failure"))
+    }
+
+    async fn provision_once(&self, state: &mut AnisetteState) -> Result<(), ProvisionAttemptError> {
         debug!("Provisioning Anisette");
         let http_client = make_reqwest()?;
         let resp = self.build_apple_request(&state, http_client.get("https://gsa.apple.com/grandslam/GsService2/lookup"))
@@ -270,29 +341,31 @@ impl AnisetteClient {
         let provision_ws_url = format!("{}/v3/provisioning_session", self.url).replace("https://", "wss://");
         let (mut connection, _) = connect_async(&provision_ws_url).await?;
 
-
-        #[derive(Deserialize)]
-        #[serde(tag = "result")]
-        enum ProvisionInput {
-            GiveIdentifier,
-            GiveStartProvisioningData,
-            GiveEndProvisioningData {
-                #[allow(dead_code)] // it's not even dead, rust just has problems
-                cpim: String
-            },
-            ProvisioningSuccess {
-                #[allow(dead_code)] // it's not even dead, rust just has problems
-                adi_pb: String
-            }
-        }
-
         loop {
-            let Some(Ok(data)) = connection.next().await else {
-                continue
+            let data = match connection.next().await {
+                Some(Ok(data)) => data,
+                Some(Err(error)) => {
+                    return Err(ProvisionAttemptError::Retryable(AnisetteError::WsError(error)));
+                }
+                None => {
+                    return Err(ProvisionAttemptError::Retryable(
+                        AnisetteError::ProvisioningSocketClosed,
+                    ));
+                }
             };
+
             if data.is_text() {
                 let txt = data.to_text().unwrap();
                 let msg: ProvisionInput = serde_json::from_str(txt)?;
+                if let Some((retryable, message)) = msg.server_error() {
+                    let error = AnisetteError::ProvisioningServerError(message);
+                    return Err(if retryable {
+                        ProvisionAttemptError::Retryable(error)
+                    } else {
+                        ProvisionAttemptError::Fatal(error)
+                    });
+                }
+
                 match msg {
                     ProvisionInput::GiveIdentifier => {
                         #[derive(Serialize)]
@@ -349,16 +422,29 @@ impl AnisetteClient {
                     ProvisionInput::ProvisioningSuccess { adi_pb } => {
                         debug!("ProvisioningSuccess");
                         state.adi_pb = Some(base64_decode(&adi_pb));
-                        connection.close(None).await?;
-                        break;
+                        return Ok(());
+                    },
+                    ProvisionInput::Wait
+                    | ProvisionInput::CurrentlyStartingProvisioning
+                    | ProvisionInput::CurrentlyEndingProvisioning => {
+                        debug!("Ignoring nonterminal anisette provisioning state");
+                    },
+                    ProvisionInput::TextOnly
+                    | ProvisionInput::WebsocketError { .. }
+                    | ProvisionInput::ClosingPerRequest
+                    | ProvisionInput::Timeout
+                    | ProvisionInput::InvalidIdentifier { .. }
+                    | ProvisionInput::StartProvisioningError { .. }
+                    | ProvisionInput::EndProvisioningError { .. } => {
+                        unreachable!("server errors are handled before provisioning dispatch")
                     }
                 }
             } else if data.is_close() {
-                break;
+                return Err(ProvisionAttemptError::Retryable(
+                    AnisetteError::ProvisioningSocketClosed,
+                ));
             }
         }
-
-        Ok(())
     }
 }
 
@@ -414,10 +500,45 @@ impl AnisetteProvider for RemoteAnisetteProviderV3 {
                     client.provision(state).await?;
                     plist::to_file_xml(config_path, state)?;
                     client.get_headers(&state).await?
-                } else { panic!() }
+                } else {
+                    return Err(err);
+                }
             },
         };
         Ok(data.get_headers())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProvisionInput;
+
+    #[test]
+    fn parses_end_provisioning_error_as_retryable_server_error() {
+        let message: ProvisionInput = serde_json::from_str(
+            r#"{"result":"EndProvisioningError","message":"Apple service temporarily rejected the request"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            message.server_error(),
+            Some((
+                true,
+                "end provisioning failed: Apple service temporarily rejected the request".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn accepts_nonterminal_server_states() {
+        for raw in [
+            r#"{"result":"Wait"}"#,
+            r#"{"result":"CurrentlyStartingProvisioning"}"#,
+            r#"{"result":"CurrentlyEndingProvisioning"}"#,
+        ] {
+            let message: ProvisionInput = serde_json::from_str(raw).unwrap();
+            assert!(message.server_error().is_none());
+        }
     }
 }
 

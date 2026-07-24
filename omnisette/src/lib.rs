@@ -52,6 +52,12 @@ pub enum AnisetteError {
     #[cfg(feature = "remote-anisette-v3")]
     #[error("JSON error {0}")]
     SerdeError(#[from] serde_json::Error),
+    #[cfg(feature = "remote-anisette-v3")]
+    #[error("Anisette provisioning server error: {0}")]
+    ProvisioningServerError(String),
+    #[cfg(feature = "remote-anisette-v3")]
+    #[error("Anisette provisioning socket closed before completion")]
+    ProvisioningSocketClosed,
     #[error("IO error {0}")]
     IOError(#[from] io::Error),
     #[error("Invalid library format")]
