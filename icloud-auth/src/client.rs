@@ -6,11 +6,11 @@ use aes::cipher::block_padding::Pkcs7;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use hmac::{Hmac, Mac};
 use omnisette::{AnisetteClient, AnisetteProvider, ArcAnisetteClient, LoginClientInfo};
-use plist::{Dictionary, Value};
+use plist::{Data, Dictionary, Value};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue}, Certificate, Client, ClientBuilder, Proxy, Response
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use srp::{
@@ -89,6 +89,50 @@ pub struct AuthTokenRequest {
     request: AuthTokenRequestBody,
 }
 
+pub fn bin_serialize<S>(x: &[u8], s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    s.serialize_bytes(x)
+}
+
+pub fn bin_deserialize<'de, D>(d: D) -> Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: Data = Deserialize::deserialize(d)?;
+    Ok(s.into())
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct PersistAccountData {
+    pub username: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    
+    #[serde(serialize_with = "bin_serialize", deserialize_with = "bin_deserialize")]
+    pub hashed_password: Vec<u8>,
+    pub postdata_done: Option<bool>,
+    
+    pub tokens: HashMap<String, FetchedToken>,
+    pub adsid: String,
+    pub dsid: u64,
+    pub acname: String,
+}
+
+impl PersistAccountData {
+    fn parse_pet_header(&mut self, data: &str) {
+        let decoded = String::from_utf8(base64::decode(data).unwrap()).unwrap();
+        self.tokens.insert("com.apple.gs.idms.pet".to_string(), FetchedToken { token: decoded.split(":").nth(1).unwrap().to_string(), expiration: SystemTime::now() + Duration::from_secs(decoded.split(":").nth(2).map(|a| a.parse::<u64>().expect("Bad pet format")).unwrap_or(300)) });
+    }
+
+    fn parse_hb_header(&mut self, data: &str) {
+        let decoded = String::from_utf8(base64::decode(data).unwrap()).unwrap();
+        self.tokens.insert("com.apple.gs.idms.hb".to_string(), FetchedToken { token: decoded.split(":").nth(1).unwrap().to_string(), expiration: SystemTime::now() + Duration::from_secs(decoded.split(":").nth(2).map(|a| a.parse::<u64>().expect("Bad hb format")).unwrap_or(300)) });
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct FetchedToken {
     token: String,
     expiration: SystemTime,
@@ -100,11 +144,10 @@ pub struct AppleAccount<T: AnisetteProvider> {
     pub client_info: LoginClientInfo,
     // pub spd:  Option<plist::Dictionary>,
     //mutable spd
-    pub spd: Option<plist::Dictionary>,
-    pub username: Option<String>,
+    spd: Option<plist::Dictionary>,
     client: Client,
-    pub tokens: HashMap<String, FetchedToken>,
-    pub hashed_password: Option<Vec<u8>>,
+    pub persisted: Option<PersistAccountData>,
+    pub update_persist: Box<dyn FnMut(&PersistAccountData) + Send + Sync>,
 }
 
 #[derive(Serialize)]
@@ -220,11 +263,11 @@ async fn parse_response(res: Result<Response, reqwest::Error>) -> Result<plist::
 
 impl<T: AnisetteProvider> AppleAccount<T> {
 
-    pub fn new_with_anisette(client_info: LoginClientInfo, anisette:  ArcAnisetteClient<T>) -> Result<Self, crate::Error> {
+    pub fn new_with_anisette(client_info: LoginClientInfo, anisette:  ArcAnisetteClient<T>, persisted: Option<PersistAccountData>, update_persist: Box<dyn FnMut(&PersistAccountData) + Send + Sync>) -> Result<Self, crate::Error> {
         let client = ClientBuilder::new()
             .cookie_store(true)
             .add_root_certificate(Certificate::from_der(APPLE_ROOT)?)
-            // .proxy(Proxy::https("https://192.168.99.71:8080").unwrap())
+            // .proxy(Proxy::https("https://192.168.99.29:8080").unwrap())
             // .danger_accept_invalid_certs(true)
             .http1_title_case_headers()
             .connection_verbose(true)
@@ -235,9 +278,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             anisette,
             client_info,
             spd: None,
-            username: None,
-            tokens: HashMap::new(),
-            hashed_password: None,
+            persisted,
+            update_persist
         })
     }
 
@@ -292,7 +334,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         client_info: LoginClientInfo,
         anisette: ArcAnisetteClient<T>
     ) -> Result<AppleAccount<T>, Error> {
-        let mut _self = AppleAccount::new_with_anisette(client_info, anisette)?;
+        let mut _self = AppleAccount::new_with_anisette(client_info, anisette, None, Box::new(|_| {}))?;
         let (username, password) = appleid_closure();
 
         let mut response = _self.login_email_pass(&username, &password).await?;
@@ -325,19 +367,20 @@ impl<T: AnisetteProvider> AppleAccount<T> {
     }
 
     pub fn get_pet(&self) -> Option<String> {
-        self.tokens.get("com.apple.gs.idms.pet").map(|t| &t.token).cloned()
+        self.persisted.as_ref()?.tokens.get("com.apple.gs.idms.pet").map(|t| &t.token).cloned()
     }
 
     pub fn get_name(&self) -> (String, String) {
         (
-            self.spd.as_ref().unwrap().get("fn").unwrap().as_string().unwrap().to_string(),
-            self.spd.as_ref().unwrap().get("ln").unwrap().as_string().unwrap().to_string()
+            self.persisted.as_ref().unwrap().first_name.clone().unwrap(),
+            self.persisted.as_ref().unwrap().last_name.clone().unwrap(),
         )
     }
 
     pub async fn get_token(&mut self, token: &str) -> Option<String> {
-        let has_valid_token = if !self.tokens.is_empty() {
-            let data = self.tokens.get(token)?; // if it's not here, we don't have one
+        let persisted = self.persisted.as_ref()?;
+        let has_valid_token = if !persisted.tokens.is_empty() {
+            let data = persisted.tokens.get(token)?; // if it's not here, we don't have one
             
             data.expiration.elapsed().is_err()
         } else {
@@ -345,9 +388,9 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         };
         if !has_valid_token {
             // we've elapsed, get new tokens...
-            let username = self.username.clone()?;
-            let hashed_password = self.hashed_password.clone()?;
-            match self.login_email_pass(&username, &hashed_password).await {
+            let username = persisted.username.clone();
+            let hashed_password = persisted.hashed_password.clone();
+            match self.login_email_pass(&username, hashed_password.as_ref()).await {
                 Ok(LoginState::LoggedIn) => {},
                 _err => {
                     error!("Failed to refresh tokens, state {_err:?}");
@@ -355,8 +398,9 @@ impl<T: AnisetteProvider> AppleAccount<T> {
                 }
             }
         }
+        let persisted = self.persisted.as_ref()?;
 
-        Some(self.tokens.get(token)?.token.to_string())
+        Some(persisted.tokens.get(token)?.token.to_string())
     }
 
     pub async fn generate_verification_token(&mut self, request: GenerateVerificationTokenRequest) -> Result<String, Error> {
@@ -368,8 +412,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         gsa_headers.extend(valid_anisette.get_generate_headers().into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), HeaderValue::from_str(&b).unwrap())));
         
         let token = self.get_token("com.apple.gs.idms.hb").await.ok_or(Error::HappyBirthdayError)?;
-        gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap(), token))).unwrap());
-        gsa_headers.insert("X-Apple-I-UrlSwitch-Info", HeaderValue::from_str(&base64::encode(format!("{}:generateVerificationToken", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap()))).unwrap());
+        gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.persisted.as_ref().unwrap().adsid, token))).unwrap());
+        gsa_headers.insert("X-Apple-I-UrlSwitch-Info", HeaderValue::from_str(&base64::encode(format!("{}:generateVerificationToken", self.persisted.as_ref().unwrap().adsid))).unwrap());
         
 
         // println!("{:?}", gsa_headers.clone());
@@ -421,7 +465,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             gsa_headers.insert("X-Apple-Identity-Token", HeaderValue::from_str(&identity_token).unwrap());
         } else {
             let token = self.get_token("com.apple.gs.idms.hb").await.ok_or(Error::HappyBirthdayError)?;
-            gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap(), token))).unwrap());
+            gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.persisted.as_ref().unwrap().adsid, token))).unwrap());
         }
         
         let data = plist::to_value(&message)?;
@@ -489,8 +533,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
         gsa_headers.insert("Accept", HeaderValue::from_str("*/*").unwrap());
         gsa_headers.extend(valid_anisette.get_postdata_headers().into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), HeaderValue::from_str(&b).unwrap())));
-        gsa_headers.insert("X-Apple-I-UrlSwitch-Info", HeaderValue::from_str(&base64::encode(format!("{}:postdata", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap()))).unwrap());
-        gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap(), token))).unwrap());
+        gsa_headers.insert("X-Apple-I-UrlSwitch-Info", HeaderValue::from_str(&base64::encode(format!("{}:postdata", self.persisted.as_ref().unwrap().adsid))).unwrap());
+        gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.persisted.as_ref().unwrap().adsid, token))).unwrap());
 
         let data = if let Some(logout) = logout {
             gsa_headers.remove("X-Apple-I-Service-Type");
@@ -569,6 +613,10 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             return Err(Error::AuthSrp)
         }
 
+        let persisted = self.persisted.as_mut().unwrap();
+        persisted.postdata_done = Some(true);
+        (self.update_persist)(persisted);
+
         Ok(LoginState::LoggedIn)
     }
 
@@ -592,8 +640,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
         gsa_headers.insert("Accept", HeaderValue::from_str("*/*").unwrap());
         gsa_headers.extend(valid_anisette.get_takedown_headers().into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), HeaderValue::from_str(&b).unwrap())));
-        gsa_headers.insert("X-Apple-I-UrlSwitch-Info", HeaderValue::from_str(&base64::encode(format!("{}:teardown", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap()))).unwrap());
-        gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.spd.as_ref().unwrap().get("adsid").expect("no adsid!!").as_string().unwrap(), token))).unwrap());
+        gsa_headers.insert("X-Apple-I-UrlSwitch-Info", HeaderValue::from_str(&base64::encode(format!("{}:teardown", self.persisted.as_ref().unwrap().adsid))).unwrap());
+        gsa_headers.insert("X-Apple-HB-Token", HeaderValue::from_str(&base64::encode(format!("{}:{}", self.persisted.as_ref().unwrap().adsid, token))).unwrap());
 
         let mut data = Dictionary::from_iter([
             ("action", Value::String(action.to_string())),
@@ -639,8 +687,6 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let srp_client = SrpClient::<Sha256>::new(&G_2048);
         let a: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
         let a_pub = srp_client.compute_public_ephemeral(&a);
-
-        self.username = Some(username.to_string());
 
         let valid_anisette = self.get_anisette().await?;
 
@@ -694,8 +740,6 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let b_pub = res.get("B").unwrap().as_data().unwrap(); // got this
         let iters = res.get("i").unwrap().as_signed_integer().unwrap();
         let c = res.get("c").unwrap().as_string().unwrap();
-
-        self.hashed_password = Some(hashed_password.to_vec());
 
         // Check which SRP protocol the server selected
         let selected_protocol = res.get("sp").and_then(|v| v.as_string()).unwrap_or("s2k");
@@ -760,6 +804,14 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         let decrypted_spd = Self::decrypt_cbc(&verifier, spd);
         let decoded_spd: plist::Dictionary = plist::from_bytes(&decrypted_spd).unwrap();
 
+        let current_persist = self.persisted.get_or_insert_default();
+        if current_persist.username != username {
+            *current_persist = Default::default();
+            warn!("Resetting for changed username, was {} now is {}", current_persist.username, username);
+        }
+        current_persist.username = username.to_string();
+        current_persist.hashed_password = hashed_password.to_vec().into();
+
         let status = res.get("Status").unwrap().as_dictionary().unwrap();
 
         if let Some(Value::Dictionary(dict)) = decoded_spd.get("t") {
@@ -773,12 +825,18 @@ impl<T: AnisetteProvider> AppleAccount<T> {
                     },
                 }))
             }).collect();
-            self.tokens = keys;
+            current_persist.tokens = keys;
         }
         debug!("spd {:?}", decoded_spd);
 
-        self.username = Some(decoded_spd.get("acname").expect("No account name?").as_string().unwrap().to_string());
+        current_persist.username = decoded_spd.get("acname").expect("No account name?").as_string().unwrap().to_string();
+        current_persist.dsid = decoded_spd.get("DsPrsId").ok_or(Error::BadSpd("No dsid!".to_string()))?.as_unsigned_integer().unwrap();
+        current_persist.adsid = decoded_spd.get("adsid").ok_or(Error::BadSpd("No adsid!".to_string()))?.as_string().unwrap().to_string();
+        current_persist.first_name = decoded_spd.get("fn").and_then(|i| i.as_string()).map(|i| i.to_string());
+        current_persist.last_name = decoded_spd.get("ln").and_then(|i| i.as_string()).map(|i| i.to_string());
+        (self.update_persist)(&current_persist);
         self.spd = Some(decoded_spd);
+        debug!("Got spd {:?}", spd);
 
         if let Some(plist::Value::String(s)) = status.get("au") {
             return match s.as_str() {
@@ -892,15 +950,16 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
     pub async fn request_update_account(&self) -> Result<String, Error> {
         let mut map = HashMap::new();
-        let adsid = self.spd.as_ref().unwrap()["adsid"].as_string().unwrap().to_string();
+        let adsid = self.persisted.as_ref().unwrap().adsid.to_string();
         let base_headers = self.anisette.lock().await.get_headers().await?.clone();
         map.extend(base_headers);
+        let account = self.persisted.as_ref().unwrap();
 
         map.extend([
-            ("Authorization", format!("Basic {}", base64::encode(format!("{}:{}", self.username.as_ref().unwrap().trim(), self.get_pet().expect("No pet?"))))),
+            ("Authorization", format!("Basic {}", base64::encode(format!("{}:{}", account.username.trim(), self.get_pet().expect("No pet?"))))),
             ("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)".to_string()),
             ("X-Apple-ADSID", adsid.clone()),
-            ("X-Apple-GS-Token", base64::encode(format!("{}:{}", adsid, self.tokens["com.apple.gs.icloud.family.auth"].token))),
+            ("X-Apple-GS-Token", base64::encode(format!("{}:{}", adsid, account.tokens["com.apple.gs.icloud.family.auth"].token))),
             ("X-Apple-I-Current-Application", "com.apple.systempreferences.AppleIDSettings".to_string()),
             ("X-Apple-I-Current-Application-Version", "1".to_string()),
             ("X-MMe-Client-Info", self.client_info.update_account_bundle_id.clone()),
@@ -951,6 +1010,8 @@ impl<T: AnisetteProvider> AppleAccount<T> {
 
         Self::check_error(&res)?;
 
+        let account = self.persisted.as_mut().unwrap();
+
         // this endpoint is stupid
         // in the SMS 2fa endpoint, all tokens have format ID:TOKEN:DURATION:EXP (MS SINCE EPOCH)
 
@@ -962,7 +1023,7 @@ impl<T: AnisetteProvider> AppleAccount<T> {
         // so what to do? Don't trust apple at all. For PET, assume 300s if no duration. For everything else, guess whether the token is epoch time or duration
         // by seeing if the number is greater than 40 years in milliseconds. No token should reasonably have a duration longer than that (besides otherwise its in secs)
 
-        self.tokens = headers.get_all("X-Apple-GS-Token").iter().chain(headers.get_all("X-Apple-HB-Token").iter()).map(|header| {
+        account.tokens = headers.get_all("X-Apple-GS-Token").iter().chain(headers.get_all("X-Apple-HB-Token").iter()).map(|header| {
             let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
             let parts = decoded.split(":").collect::<Vec<&str>>();
             let exp = parts.get(2).map(|i| i.parse().expect("Bad expiration format?")).unwrap_or(31536000);
@@ -980,10 +1041,17 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             })
         }).collect();
 
+        if let Some(hb) = headers.get("X-Apple-HB-Token") {
+            account.parse_hb_header(hb.to_str().unwrap());
+        }
+
         if let Some(pet) = headers.get("X-Apple-PE-Token") {
-            self.parse_pet_header(pet.to_str().unwrap());
+            account.parse_pet_header(pet.to_str().unwrap());
+            (self.update_persist)(account);
             return Ok(LoginState::LoggedIn);
         }
+
+        (self.update_persist)(account);
 
         Ok(LoginState::NeedsLogin)
     }
@@ -1007,7 +1075,9 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             return Err(Error::Bad2faCode);
         }
 
-        self.tokens = res.headers().get_all("X-Apple-GS-Token").iter().chain(res.headers().get_all("X-Apple-HB-Token").iter()).map(|header| {
+        let account = self.persisted.as_mut().unwrap();
+
+        account.tokens = res.headers().get_all("X-Apple-GS-Token").iter().chain(res.headers().get_all("X-Apple-HB-Token").iter()).map(|header| {
             let decoded = String::from_utf8(base64::decode(&header.as_bytes()).expect("Not base64!")).expect("Decoded not utf8!");
             let parts = decoded.split(":").collect::<Vec<&str>>();
 
@@ -1026,17 +1096,17 @@ impl<T: AnisetteProvider> AppleAccount<T> {
             })
         }).collect();
 
+        if let Some(hb) = res.headers().get("X-Apple-HB-Token") {
+            account.parse_hb_header(hb.to_str().unwrap());
+        }
         if let Some(pet) = res.headers().get("X-Apple-PE-Token") {
-            self.parse_pet_header(pet.to_str().unwrap());
+            account.parse_pet_header(pet.to_str().unwrap());
+            (self.update_persist)(account);
             return Ok(LoginState::LoggedIn);
         }
+        (self.update_persist)(account);
 
         Ok(LoginState::NeedsLogin)
-    }
-
-    fn parse_pet_header(&mut self, data: &str) {
-        let decoded = String::from_utf8(base64::decode(data).unwrap()).unwrap();
-        self.tokens.insert("com.apple.gs.idms.pet".to_string(), FetchedToken { token: decoded.split(":").nth(1).unwrap().to_string(), expiration: SystemTime::now() + Duration::from_secs(decoded.split(":").nth(2).map(|a| a.parse::<u64>().expect("Bad pet format")).unwrap_or(300)) });
     }
 
     fn check_error(res: &plist::Dictionary) -> Result<(), Error> {
