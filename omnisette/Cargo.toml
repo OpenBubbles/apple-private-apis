@@ -30,7 +30,7 @@ chrono = { version = "0.4.37" }
 thiserror = "1.0.58"
 anyhow = "1.0.81"
 clearadi = { path = "../clearadi", optional = true }
-tokio = "1"
+tokio = { version = "1", features = ["time"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dlopen2 = "0.4"
